@@ -1,136 +1,60 @@
-"""Unit tests for silver → gold star schema."""
+"""Current SDP gold queries: normalized groups, currency units and failed facts."""
 
-from datetime import date
+import importlib.util
 from decimal import Decimal
+from pathlib import Path
 
-from payments_lake.gold import DATE_END, DATE_START, dim_date, to_gold
-from payments_lake.silver import to_silver
-
-
-def _bronze(event_id, merchant_id, user_id, amount, status, ts):
-    return {
-        "event_id": event_id,
-        "merchant_id": merchant_id,
-        "user_id": user_id,
-        "amount_usd": amount,
-        "currency": "USD",
-        "status": status,
-        "event_timestamp": ts,
-        "schema_version": 1,
-        "ingest_source": "payment_gateway",
-        "year": "2026",
-        "month": "08",
-        "day": "23",
-        "hour": "02",
-    }
+from test_sdp_silver import _load, _row
 
 
-SAMPLE = [
-    _bronze(
-        "5ef2c2fa-d3fc-4326-9a2d-ad1a0e2689a4",
-        "mrc_0013",
-        "usr_000132",
-        "22.7",
-        "captured",
-        "2026-08-23T02:22:27.333120Z",
-    ),
-    _bronze(
-        "c2020e17-881c-41fe-bba1-dceff04bb59a",
-        "mrc_0013",
-        "usr_000374",
-        "40.55",
-        "captured",
-        "2026-08-23T02:22:27.401825Z",
-    ),
-    _bronze(
-        "f580f5d7-60d6-49d5-b574-ec18a357d17a",
-        "mrc_0018",
-        "usr_000246",
-        "11.21",
-        "failed",
-        "2026-08-23T02:22:27.424743Z",
-    ),
-    _bronze(
-        "4483b205-3ba1-4abe-bc68-155343daf1e2",
-        "mrc_0006",
-        "usr_000156",
-        "9.95",
-        "authorized",
-        "2026-08-23T02:22:27.355930Z",
-    ),
-    _bronze(
-        "0bccd7d1-5ed0-4546-a1df-7a5a671bc4af",
-        "mrc_0025",
-        "usr_000123",
-        "243.84",
-        "captured",
-        "2026-08-23T02:22:27.733259Z",
-    ),
-]
-
-
-def _star():
-    silver, rejected = to_silver(SAMPLE)
-    assert rejected == []
-    return to_gold(silver)
-
-
-def test_fact_grain_and_revenue_flag():
-    gold = _star()
-    facts = gold["fact_payment"]
-    assert len(facts) == 5
-    assert len({row["event_id"] for row in facts}) == 5
-    by_id = {row["event_id"]: row for row in facts}
-
-    captured = by_id["5ef2c2fa-d3fc-4326-9a2d-ad1a0e2689a4"]
-    assert captured["date_key"] == 20260823
-    assert captured["merchant_id"] == "mrc_0013"
-    assert captured["amount_usd"] == Decimal("22.70")
-    assert captured["amount_cents"] == 2270
-    assert captured["is_revenue"] is True
-    assert captured["amount_band"] == "small"
-
-    failed = by_id["f580f5d7-60d6-49d5-b574-ec18a357d17a"]
-    assert failed["is_revenue"] is False
-    assert failed["status"] == "failed"
-
-    large = by_id["0bccd7d1-5ed0-4546-a1df-7a5a671bc4af"]
-    assert large["amount_band"] == "large"
-    assert large["is_revenue"] is True
-
-
-def test_fact_foreign_keys_exist_in_dims():
-    gold = _star()
-    facts = gold["fact_payment"]
-    date_keys = {row["date_key"] for row in gold["dim_date"]}
-    merchants = {row["merchant_id"] for row in gold["dim_merchant"]}
-    users = {row["user_id"] for row in gold["dim_user"]}
-    statuses = {row["status"] for row in gold["dim_status"]}
-
-    assert {row["date_key"] for row in facts} <= date_keys
-    assert {row["merchant_id"] for row in facts} <= merchants
-    assert {row["user_id"] for row in facts} <= users
-    assert {row["status"] for row in facts} <= statuses
-    assert merchants == {"mrc_0006", "mrc_0013", "mrc_0018", "mrc_0025"}
-    assert len(gold["dim_user"]) == 5
-
-
-def test_dim_status_revenue_only_for_captured():
-    gold = _star()
-    by_status = {row["status"]: row for row in gold["dim_status"]}
-    assert set(by_status) == {"authorized", "captured", "failed", "refunded"}
-    assert by_status["captured"]["is_revenue"] is True
-    assert by_status["failed"]["is_revenue"] is False
-    assert by_status["authorized"]["is_revenue"] is False
-    assert by_status["refunded"]["is_revenue"] is False
-
-
-def test_dim_date_calendar_range_and_weekend():
-    rows = dim_date()
-    assert rows[0]["full_date"] == DATE_START
-    assert rows[-1]["full_date"] == DATE_END
-    assert rows[0]["date_key"] == 20260101
-    sunday = next(row for row in rows if row["full_date"] == date(2026, 8, 23))
-    assert sunday["day_of_week"] == "Sunday"
-    assert sunday["is_weekend"] is True
-    assert sunday["month_name"] == "August"
+def test_gold_normalizes_groups_and_preserves_currency(spark, silver):
+    _load(
+        spark,
+        silver,
+        [
+            _row(
+                event_id="old",
+                amount=None,
+                amount_usd="10.10",
+                status=" Captured ",
+                currency=" usd ",
+            ),
+            _row(event_id="new", amount="20.20", status="CAPTURED", currency="USD"),
+            _row(event_id="brl", amount="100.00", status="captured", currency="brl"),
+            _row(event_id="failed", amount="5.50", status=" FAILED ", currency=" usd "),
+            _row(event_id="authorized", amount="2.00", status="authorized"),
+            _row(event_id="refunded", amount="3.00", status="refunded"),
+        ],
+    )
+    silver.silver_payments().createOrReplaceTempView("silver_payments")
+    path = (
+        Path(__file__).resolve().parents[1]
+        / "pipelines/sdp/payments/transformations/03_gold.py"
+    )
+    spec = importlib.util.spec_from_file_location("payments_sdp_gold", path)
+    gold = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(gold)
+    try:
+        gold.fact_payments_temp().createOrReplaceTempView("fact_payments_temp")
+        accepted = gold.fact_payments().collect()
+        rejected = gold.fact_payments_rejected().collect()
+        by_key = {(row.status, row.currency): row for row in accepted}
+        usd = by_key["captured", "USD"]
+        assert usd.amount == Decimal("30.30")
+        assert usd.txn_count == 2
+        assert usd.unique_users == 1
+        assert by_key["captured", "BRL"].amount == Decimal("100.00")
+        assert set(by_key) == {
+            ("captured", "USD"),
+            ("captured", "BRL"),
+            ("authorized", "USD"),
+            ("refunded", "USD"),
+        }
+        assert len(rejected) == 1
+        assert rejected[0].status == "failed"
+        assert rejected[0].currency == "USD"
+        assert rejected[0].amount == Decimal("5.50")
+        assert sum(row.txn_count for row in accepted + rejected) == 6
+    finally:
+        spark.catalog.dropTempView("fact_payments_temp")
+        spark.catalog.dropTempView("silver_payments")

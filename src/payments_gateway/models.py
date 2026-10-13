@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from decimal import Decimal
 from enum import Enum
-from typing import Any
+from typing import Annotated, Any
 from uuid import uuid4
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+
+Money = Annotated[Decimal, Field(gt=0, max_digits=18, decimal_places=2)]
 
 
 class PaymentStatus(str, Enum):
@@ -25,14 +28,22 @@ class PaymentEvent(BaseModel):
     event_id: str = Field(default_factory=lambda: str(uuid4()))
     merchant_id: str
     user_id: str
-    amount_usd: float = Field(gt=0)
+    amount: Money
     currency: str = Field(default="USD", min_length=3, max_length=3)
     status: PaymentStatus
     event_timestamp: datetime = Field(
         default_factory=lambda: datetime.now(timezone.utc)
     )
-    schema_version: int = Field(default=1, ge=1)
+    schema_version: int = Field(default=3, ge=3)
     ingest_source: str = Field(default="payment_gateway")
+
+    @model_validator(mode="before")
+    @classmethod
+    def reject_legacy_amount(cls, value: Any) -> Any:
+        """Legacy amounts are read from the lake, never published by this producer."""
+        if isinstance(value, dict) and "amount_usd" in value:
+            raise ValueError("Use amount in the transaction currency, not amount_usd")
+        return value
 
     @field_validator("currency")
     @classmethod
@@ -47,7 +58,7 @@ class PaymentEvent(BaseModel):
         return value.astimezone(timezone.utc)
 
     def partition_key(self) -> str:
-        """Kinesis partition key — merchant_id keeps per-merchant ordering."""
+        """Route a merchant's records to the same shard; PutRecords may reorder."""
         return self.merchant_id
 
     def to_kinesis_data(self) -> bytes:

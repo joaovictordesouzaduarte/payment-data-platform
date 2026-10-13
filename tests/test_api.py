@@ -60,7 +60,7 @@ def test_create_payment_event_accepted():
             json={
                 "merchant_id": "mrc_0001",
                 "user_id": "usr_000001",
-                "amount_usd": 25.5,
+                "amount": 25.5,
                 "status": "captured",
             },
         )
@@ -69,6 +69,9 @@ def test_create_payment_event_accepted():
         assert body["succeeded"] == 1
         assert body["event"]["merchant_id"] == "mrc_0001"
         assert body["event"]["status"] == PaymentStatus.CAPTURED.value
+        assert body["event"]["amount"] == "25.5"
+        assert body["event"]["schema_version"] == 3
+        assert "amount_usd" not in body["event"]
         assert len(stub.published) == 1
     finally:
         app.dependency_overrides.clear()
@@ -85,7 +88,7 @@ def test_create_payment_event_kinesis_failure():
             json={
                 "merchant_id": "mrc_0001",
                 "user_id": "usr_000001",
-                "amount_usd": 25.5,
+                "amount": 25.5,
                 "status": "failed",
             },
         )
@@ -105,7 +108,7 @@ def test_create_payment_event_validation_error():
             json={
                 "merchant_id": "mrc_0001",
                 "user_id": "usr_000001",
-                "amount_usd": -1,
+                "amount": -1,
                 "status": "captured",
             },
         )
@@ -147,5 +150,24 @@ def test_generate_payment_events_default_count():
         body = response.json()
         assert body["attempted"] == 25
         assert body["succeeded"] == 25
+    finally:
+        app.dependency_overrides.clear()
+
+
+def test_legacy_only_amount_request_is_rejected():
+    stub = StubProducer()
+    app.dependency_overrides[get_producer] = lambda: stub
+    try:
+        response = TestClient(app).post(
+            "/payments/events",
+            json={
+                "merchant_id": "m",
+                "user_id": "u",
+                "amount_usd": 10,
+                "status": "captured",
+            },
+        )
+        assert response.status_code == 422
+        assert stub.published == []
     finally:
         app.dependency_overrides.clear()

@@ -6,7 +6,10 @@ libraries:
   - glob:
       include: transformations/**
 configuration:
+  spark.sql.session.timeZone: UTC
   spark.sql.catalog.${catalog}: org.apache.iceberg.spark.SparkCatalog
   spark.sql.catalog.${catalog}.catalog-impl: org.apache.iceberg.aws.glue.GlueCatalog
   spark.sql.catalog.${catalog}.io-impl: org.apache.iceberg.aws.s3.S3FileIO
   spark.sql.catalog.${catalog}.warehouse: s3://${bucket}/iceberg-warehouse
+  # Commit reports cover every persisted bronze/silver/gold table in this catalog.
+  spark.sql.catalog.${catalog}.metrics-reporter-impl: org.apache.iceberg.metrics.LoggingMetricsReporter

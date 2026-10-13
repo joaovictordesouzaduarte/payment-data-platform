@@ -12,7 +12,7 @@ def _event(event_id: str, merchant_id: str = "mrc_0001") -> PaymentEvent:
         event_id=event_id,
         merchant_id=merchant_id,
         user_id="usr_000001",
-        amount_usd=12.34,
+        amount=12.34,
         status=PaymentStatus.CAPTURED,
     )
 

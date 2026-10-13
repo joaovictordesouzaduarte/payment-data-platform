@@ -1,120 +1,92 @@
-"""Unit tests for bronze → silver transforms."""
+"""Read old and new JSON with the actual Registry-to-Spark schema adapter."""
 
-from datetime import date, datetime
+import importlib.util
+import json
 from decimal import Decimal
+from importlib.machinery import SourceFileLoader
+from pathlib import Path
+from types import SimpleNamespace
 
-from payments_lake.silver import to_silver, to_spark_record
+import pytest
 
-
-def _row(**overrides):
-    base = {
-        "event_id": "5ef2c2fa-d3fc-4326-9a2d-ad1a0e2689a4",
-        "merchant_id": "mrc_0013",
-        "user_id": "usr_000132",
-        "amount_usd": "22.7",
-        "currency": "usd",
-        "status": "captured",
-        "event_timestamp": "2026-08-23T02:22:27.333120Z",
-        "schema_version": "1",
-        "ingest_source": "payment_gateway",
-        "year": "2026",
-        "month": "08",
-        "day": "23",
-        "hour": "03",
-    }
-    base.update(overrides)
-    return base
+pytest.importorskip("pyspark")
 
 
-def test_silver_types_flags_and_event_time_partitions():
-    accepted, rejected = to_silver([_row()])
-    assert rejected == []
-    assert len(accepted) == 1
-    row = accepted[0]
-    assert row["amount_usd"] == Decimal("22.70")
-    assert row["amount_cents"] == 2270
-    assert row["currency"] == "USD"
-    assert row["is_captured"] is True
-    assert row["is_revenue"] is True
-    assert row["amount_band"] == "small"
-    assert row["event_date"] == date(2026, 8, 23)
-    assert row["event_hour"] == 2
-    assert row["year"] == "2026"
-    assert row["month"] == "08"
-    assert row["day"] == "23"
-    assert row["ingest_hour"] == "03"
-    assert row["ingest_lag_hours"] == 1
+def test_registry_bronze_to_silver_reads_historical_and_new_json(
+    spark, silver, monkeypatch, tmp_path
+):
+    import boto3
+    import pyspark
+    from pyspark.sql import functions as F
 
+    from payments_gateway.models import PaymentEvent
 
-def test_amount_bands():
-    cases = [
-        ("3.22", "micro"),
-        ("9.95", "micro"),
-        ("50.00", "medium"),
-        ("243.84", "large"),
-    ]
-    for amount, band in cases:
-        accepted, rejected = to_silver([_row(amount_usd=amount)])
-        assert rejected == []
-        assert accepted[0]["amount_band"] == band
-
-
-def test_failed_is_not_revenue():
-    accepted, _ = to_silver([_row(status="failed", amount_usd="11.21")])
-    assert accepted[0]["is_failed"] is True
-    assert accepted[0]["is_revenue"] is False
-
-
-def test_ingest_partitions_from_firehose_path():
-    accepted, _ = to_silver(
-        [
-            _row(
-                year=None,
-                month=None,
-                day=None,
-                hour=None,
-                _source=(
-                    "s3://bucket/payments/raw/year=2026/month=08/"
-                    "day=22/hour=23/obj.gz"
-                ),
-            )
-        ]
+    root = Path(__file__).resolve().parents[1]
+    definition = json.loads(
+        (root / "infra/terraform/schemas/payment_event.json").read_text()
     )
-    assert accepted[0]["ingest_year"] == "2026"
-    assert accepted[0]["ingest_month"] == "08"
-    assert accepted[0]["ingest_day"] == "22"
-    assert accepted[0]["ingest_hour"] == "23"
+    requests = []
 
+    class Registry:
+        def get_schema_version(self, **kwargs):
+            requests.append(kwargs)
+            return {"SchemaDefinition": json.dumps(definition)}
 
-def test_dedup_keeps_latest_event_timestamp():
-    older = _row(event_timestamp="2026-08-23T02:22:27.333120Z", amount_usd="10.00")
-    newer = _row(event_timestamp="2026-08-23T02:22:28.333120Z", amount_usd="99.00")
-    accepted, rejected = to_silver([older, newer])
-    assert rejected == []
-    assert len(accepted) == 1
-    assert accepted[0]["amount_usd"] == Decimal("99.00")
+    monkeypatch.setattr(boto3, "client", lambda *args, **kwargs: Registry())
+    monkeypatch.setattr(
+        pyspark,
+        "pipelines",
+        SimpleNamespace(
+            create_streaming_table=lambda *args, **kwargs: None,
+            append_flow=lambda **kwargs: lambda query: query,
+        ),
+    )
+    path = root / "pipelines/sdp/payments/transformations/01_bronze.py.tftpl"
+    spec = importlib.util.spec_from_file_location(
+        "payments_sdp_bronze",
+        path,
+        loader=SourceFileLoader("payments_sdp_bronze", str(path)),
+    )
+    bronze = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(bronze)
+    assert "amount" not in definition.get("required", [])
+    assert "amount_usd" not in definition.get("required", [])
+    assert "type" not in definition["properties"]["amount"]
 
-
-def test_quarantine_invalid_rows():
-    rows = [
-        _row(event_id="not-a-uuid"),
-        _row(event_id="4483b205-3ba1-4abe-bc68-155343daf1e2", amount_usd="-1"),
-        _row(event_id="0262780c-240e-4718-9691-9980f0bc59a3", status="charged"),
-        _row(event_id="71ea6ac5-c206-4711-a3ee-ba81c42f5aba", merchant_id=""),
+    core = dict(
+        merchant_id="m",
+        user_id="u",
+        status="captured",
+        currency="BRL",
+        event_timestamp="2026-10-12T00:00:00Z",
+    )
+    payloads = [
+        dict(core, event_id="legacy", amount_usd=12.34),
+        json.loads(
+            PaymentEvent(
+                **core, event_id="new", amount="9999999999999999.99"
+            ).to_kinesis_data()
+        ),
+        dict(core, event_id="numeric", amount=23.45),
     ]
-    accepted, rejected = to_silver(rows)
-    assert accepted == []
-    reasons = {row["rejection_reason"] for row in rejected}
-    assert "invalid_event_id" in reasons
-    assert "non_positive_amount" in reasons
-    assert "invalid_status" in reasons
-    assert "missing_fields:merchant_id" in reasons
-
-
-def test_to_spark_record_serializes_decimal_and_dates():
-    accepted, _ = to_silver([_row()])
-    record = to_spark_record(accepted[0])
-    assert isinstance(record["amount_usd"], float)
-    assert record["event_date"] == "2026-08-23"
-    assert record["event_timestamp"].startswith("2026-08-23T02:22:27")
-    assert isinstance(datetime.fromisoformat(record["event_timestamp"]), datetime)
+    file = tmp_path / "events.json"
+    file.write_text("\n".join(json.dumps(row) for row in payloads))
+    monkeypatch.setattr(bronze, "BRONZE_PATH", str(tmp_path))
+    registry_stream = bronze.ingest_bronze()
+    assert "amount" in registry_stream.schema.fieldNames()
+    assert "amount_usd" in registry_stream.schema.fieldNames()
+    (
+        spark.read.schema(registry_stream.schema)
+        .json(str(file))
+        .drop("source_file")
+        .withColumn("source_file", F.input_file_name())
+        .createOrReplaceTempView("bronze_payments")
+    )
+    silver.silver_payments_temp().createOrReplaceTempView("silver_payments_temp")
+    rows = silver.silver_payments().collect()
+    assert {row.event_id: row.amount for row in rows} == {
+        "legacy": Decimal("12.34"),
+        "new": Decimal("9999999999999999.99"),
+        "numeric": Decimal("23.45"),
+    }
+    assert silver.silver_payments_rejected().count() == 0

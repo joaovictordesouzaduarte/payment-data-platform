@@ -8,6 +8,7 @@ import random
 import sys
 import time
 from datetime import datetime, timezone
+from decimal import Decimal
 from typing import TypeVar
 from uuid import uuid4
 
@@ -70,11 +71,11 @@ def generate_event() -> PaymentEvent:
         event_id=str(uuid4()),
         merchant_id=random.choice(MERCHANT_IDS),
         user_id=random.choice(USER_IDS),
-        amount_usd=amount,
+        amount=Decimal(str(amount)),
         currency=_weighted_choice(CURRENCY_WEIGHTS),
         status=_weighted_choice(STATUS_WEIGHTS),
         event_timestamp=datetime.now(timezone.utc),
-        schema_version=2 if extras else 1,
+        schema_version=3,
         ingest_source="payment_gateway",
         **extras,
     )

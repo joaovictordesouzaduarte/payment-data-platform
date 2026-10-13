@@ -1,92 +1,83 @@
 # Athena demo queries
 
-Use workgroup `rtmsp-dev-payments` (`terraform output -raw athena_workgroup`). Silver and gold are Iceberg tables registered by the Glue jobs (DDL under `sql/athena/gold/` only if a table is missing).
+Use workgroup `rtmsp-dev-payments` and the SDP Iceberg tables below. Replace the
+date with the day represented by your events. The legacy star DDL in
+`sql/athena/gold/` does not create the current SDP output.
 
-Substitute the date filter for the day you generated events. GMV is captured amount only (`dim_status.is_revenue` or `fact_payment.is_revenue`).
+`amount` is in the transaction currency; preserve currency in aggregations.
+GMV means captured amount only. Gold `txn_count` is already aggregated: use
+`SUM(txn_count)`, not `COUNT(*)`. Gold `unique_users` cannot be summed for an
+exact cross-group distinct count; query silver for that metric.
 
-## Top merchants by GMV
+## Top merchants by GMV within each currency
 
 ```sql
-SELECT
-  m.merchant_id,
-  d.full_date,
-  SUM(f.amount_usd) AS gmv_usd,
-  COUNT(*) AS captured_count,
-  COUNT(DISTINCT f.user_id) AS unique_users,
-  SUM(f.amount_usd) / COUNT(*) AS aov_usd
-FROM rtmsp_dev_payments.fact_payment f
-JOIN rtmsp_dev_payments.dim_merchant m ON f.merchant_id = m.merchant_id
-JOIN rtmsp_dev_payments.dim_date d ON f.date_key = d.date_key
-JOIN rtmsp_dev_payments.dim_status s ON f.status = s.status
-WHERE f.year = '2026'
-  AND f.month = '08'
-  AND f.day = '23'
-  AND s.is_revenue = true
-GROUP BY m.merchant_id, d.full_date
-ORDER BY gmv_usd DESC
-LIMIT 10;
+SELECT merchant_id, full_date, currency,
+       SUM(amount) AS gmv,
+       SUM(txn_count) AS captured_count,
+       SUM(amount) / NULLIF(SUM(txn_count), 0) AS average_payment_amount
+FROM rtmsp_dev_payments.fact_payments
+WHERE full_date = '2026-10-12' AND status = 'captured'
+GROUP BY merchant_id, full_date, currency
+ORDER BY currency, gmv DESC;
 ```
 
-## Highest failure rate (at least 5 transactions)
+## Highest failure rate with at least five events
+
+Failed payments are business outcomes in `fact_payments_rejected`, separate
+from invalid data in `silver_payments_rejected`. Read both facts for the total.
 
 ```sql
-SELECT
-  m.merchant_id,
-  d.full_date,
-  COUNT(*) AS txn_count,
-  SUM(CASE WHEN f.status = 'failed' THEN 1 ELSE 0 END) AS failed_count,
-  CAST(SUM(CASE WHEN f.status = 'failed' THEN 1 ELSE 0 END) AS DOUBLE)
-    / COUNT(*) AS failure_rate,
-  SUM(CASE WHEN f.status = 'failed' THEN f.amount_usd ELSE 0 END) AS failed_usd
-FROM rtmsp_dev_payments.fact_payment f
-JOIN rtmsp_dev_payments.dim_merchant m ON f.merchant_id = m.merchant_id
-JOIN rtmsp_dev_payments.dim_date d ON f.date_key = d.date_key
-WHERE f.year = '2026'
-  AND f.month = '08'
-GROUP BY m.merchant_id, d.full_date
-HAVING COUNT(*) >= 5
-ORDER BY failure_rate DESC, failed_count DESC
-LIMIT 10;
+WITH all_payments AS (
+    SELECT * FROM rtmsp_dev_payments.fact_payments
+    UNION ALL
+    SELECT * FROM rtmsp_dev_payments.fact_payments_rejected
+)
+SELECT merchant_id, full_date, currency,
+       SUM(txn_count) AS event_count,
+       SUM(CASE WHEN status = 'failed' THEN txn_count ELSE 0 END) AS failed_count,
+       CAST(SUM(CASE WHEN status = 'failed' THEN txn_count ELSE 0 END) AS DOUBLE)
+           / SUM(txn_count) AS failure_rate
+FROM all_payments
+WHERE full_date = '2026-10-12'
+GROUP BY merchant_id, full_date, currency
+HAVING SUM(txn_count) >= 5
+ORDER BY failure_rate DESC;
 ```
 
-## Daily status mix
+## Daily captured amounts by merchant country
 
 ```sql
-SELECT
-  d.full_date,
-  s.status,
-  COUNT(*) AS txn_count,
-  SUM(f.amount_usd) AS amount_usd,
-  COUNT(DISTINCT f.merchant_id) AS unique_merchants,
-  COUNT(DISTINCT f.user_id) AS unique_users
-FROM rtmsp_dev_payments.fact_payment f
-JOIN rtmsp_dev_payments.dim_date d ON f.date_key = d.date_key
-JOIN rtmsp_dev_payments.dim_status s ON f.status = s.status
-WHERE f.year = '2026'
-  AND f.month = '08'
-  AND f.day = '23'
-GROUP BY d.full_date, s.status
-ORDER BY s.status;
+SELECT f.full_date, c.country_name, f.currency,
+       SUM(f.amount) AS gmv, SUM(f.txn_count) AS captured_count
+FROM rtmsp_dev_payments.fact_payments f
+LEFT JOIN rtmsp_dev_payments.dim_country c ON f.country = c.country_code
+LEFT JOIN rtmsp_dev_payments.dim_status s ON f.status = s.status_code
+WHERE f.full_date = '2026-10-12' AND f.status = 'captured'
+GROUP BY f.full_date, c.country_name, f.currency
+ORDER BY f.currency, gmv DESC;
 ```
 
-## Large-ticket captures
+## Exact distinct captured users
 
 ```sql
-SELECT
-  f.event_id,
-  f.merchant_id,
-  f.user_id,
-  f.amount_usd,
-  f.amount_band,
-  d.full_date,
-  f.event_hour
-FROM rtmsp_dev_payments.fact_payment f
-JOIN rtmsp_dev_payments.dim_date d ON f.date_key = d.date_key
-JOIN rtmsp_dev_payments.dim_status s ON f.status = s.status
-WHERE f.year = '2026'
-  AND f.month = '08'
-  AND f.day = '23'
-  AND s.is_revenue = true
-  AND f.amount_band = 'large'
-ORDER BY f.amount_usd DESC;
+SELECT year, month, day, currency_normalized AS currency,
+       COUNT(DISTINCT user_id) AS unique_users
+FROM rtmsp_dev_payments.silver_payments
+WHERE year = '2026' AND month = '10' AND day = '12'
+  AND status_normalized = 'captured'
+GROUP BY year, month, day, currency_normalized;
+```
+
+## Data quality rejection counts
+
+Invalid timestamps have null event-day partitions, so omit the date filter when
+investigating parsing failures. Counts by reason can overlap for the same row.
+
+```sql
+SELECT reason, COUNT(*) AS rejected_rows
+FROM rtmsp_dev_payments.silver_payments_rejected
+CROSS JOIN UNNEST(rejection_reasons) AS t(reason)
+GROUP BY reason
+ORDER BY rejected_rows DESC;
 ```

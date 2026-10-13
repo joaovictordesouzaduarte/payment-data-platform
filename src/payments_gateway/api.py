@@ -10,7 +10,7 @@ from fastapi import Depends, FastAPI, HTTPException, status
 from pydantic import BaseModel, Field
 
 from payments_gateway.config import Settings
-from payments_gateway.models import PaymentEvent, PaymentStatus
+from payments_gateway.models import Money, PaymentEvent, PaymentStatus
 from payments_gateway.producer import PaymentEventProducer, PublishResult
 from payments_gateway.simulator import generate_event
 
@@ -22,11 +22,11 @@ class CreatePaymentRequest(BaseModel):
 
     merchant_id: str
     user_id: str
-    amount_usd: float = Field(gt=0)
-    currency: str = "USD"
+    amount: Money
+    currency: str = Field(default="USD", min_length=3, max_length=3)
     status: PaymentStatus
     event_id: str | None = None
-    schema_version: int = Field(default=1, ge=1)
+    schema_version: int = Field(default=3, ge=3)
 
 
 class GeneratePaymentsRequest(BaseModel):

@@ -47,10 +47,17 @@ resource "aws_s3_object" "pipeline_gold" {
   etag   = filemd5("${local.pipeline_dir}/transformations/03_gold.py")
 }
 
+resource "aws_s3_object" "pipeline_dimensions" {
+  bucket = local.payments_glue_bucket.id
+  key    = "glue/pipelines/payments/transformations/04_dimensions.py"
+  source = "${local.pipeline_dir}/transformations/04_dimensions.py"
+  etag   = filemd5("${local.pipeline_dir}/transformations/04_dimensions.py")
+}
+
 resource "aws_glue_job" "payments_sdp" {
   name              = local.pipeline_name
   role_arn          = aws_iam_role.glue_crawler.arn
-  description       = "SDP bronze→silver: Firehose JSON to Iceberg silver_payments and quarantine."
+  description       = "SDP bronze→silver→gold: payment tables and shared calendar dimension."
   glue_version      = "6.0"
   worker_type       = "G.1X"
   number_of_workers = 2
@@ -66,7 +73,7 @@ resource "aws_glue_job" "payments_sdp" {
   default_arguments = {
     "--enable-spark-declarative-pipeline" = "true"
     "--datalake-formats"                  = "iceberg"
-    "--conf"                              = "spark.sql.extensions=org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions"
+    "--conf"                              = "spark.sql.extensions=org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions --conf spark.log.level=INFO"
     "--enable-continuous-cloudwatch-log"  = "true"
   }
 
@@ -75,6 +82,7 @@ resource "aws_glue_job" "payments_sdp" {
     aws_s3_object.pipeline_bronze,
     aws_s3_object.pipeline_silver,
     aws_s3_object.pipeline_gold,
+    aws_s3_object.pipeline_dimensions,
     aws_iam_role_policy.glue_crawler,
   ]
 }

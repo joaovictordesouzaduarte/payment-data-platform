@@ -40,7 +40,7 @@ testpaths = ["tests"]
 
 [tool.ruff]
 target-version = "py310"
-src = ["src", "tests", "jobs"]
+src = ["src", "tests", "pipelines"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I"]

@@ -7,6 +7,7 @@
       "merchant_id": { "type": "string" },
       "user_id": { "type": "string" },
       "amount_usd": { "type": "number" },
+      "amount": { "type": "number" },
       "currency": { "type": "string" },
       "status": { "type": "string" },
       "event_timestamp": { "type": "string" },

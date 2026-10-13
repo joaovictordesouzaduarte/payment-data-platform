@@ -8,7 +8,6 @@ from pyspark.sql import DataFrame, SparkSession
 from pyspark.sql.functions import input_file_name
 from pyspark.sql.types import (
     BooleanType,
-    DataType,
     DoubleType,
     LongType,
     StringType,
@@ -22,41 +21,6 @@ REGISTRY_NAME = "${registry_name}"
 SCHEMA_NAME = "${schema_name}"
 AWS_REGION = "${aws_region}"
 
-_JSON_TO_SPARK: dict[str, DataType] = {
-    "string": StringType(),
-    "number": DoubleType(),
-    "double": DoubleType(),
-    "integer": LongType(),
-    "long": LongType(),
-    "boolean": BooleanType(),
-}
-
-
-def _spark_type(spec: dict | str) -> DataType:
-    type_name = spec.get("type", "string") if isinstance(spec, dict) else spec
-    return _JSON_TO_SPARK.get(type_name, StringType())
-
-
-def _struct_from_json_schema(definition: dict) -> StructType:
-    if "properties" in definition:
-        items = {name: spec for name, spec in definition["properties"].items()}
-    else:
-        items = definition
-    return StructType(
-        [StructField(name, _spark_type(spec), True) for name, spec in items.items()]
-    )
-
-
-def _payments_schema() -> StructType:
-    response = boto3.client("glue", region_name=AWS_REGION).get_schema_version(
-        SchemaId={"RegistryName": REGISTRY_NAME, "SchemaName": SCHEMA_NAME},
-        SchemaVersionNumber={"LatestVersion": True},
-    )
-    return _struct_from_json_schema(json.loads(response["SchemaDefinition"]))
-
-
-PAYMENTS_SCHEMA = _payments_schema()
-
 dp.create_streaming_table(
     "bronze_payments",
     comment="Raw payment events as landed by Firehose",
@@ -66,11 +30,51 @@ dp.create_streaming_table(
 
 @dp.append_flow(target="bronze_payments")
 def ingest_bronze() -> DataFrame:
+    definition = json.loads(
+        boto3.client("glue", region_name=AWS_REGION).get_schema_version(
+            SchemaId={"RegistryName": REGISTRY_NAME, "SchemaName": SCHEMA_NAME},
+            SchemaVersionNumber={"LatestVersion": True},
+        )["SchemaDefinition"]
+    )
+    spark_types = {
+        "string": StringType(),
+        "number": DoubleType(),
+        "double": DoubleType(),
+        "integer": LongType(),
+        "long": LongType(),
+        "boolean": BooleanType(),
+    }
+    schema = StructType(
+        [
+            StructField(
+                name,
+                spark_types.get(
+                    spec.get("type") if isinstance(spec, dict) else spec,
+                    StringType(),
+                ),
+                True,
+            )
+            for name, spec in definition["properties"].items()
+        ]
+    )
     return (
         spark.readStream.format("json")
-        .schema(PAYMENTS_SCHEMA)
+        .schema(schema)
         .option("recursiveFileLookup", "true")
         .option("mergeSchema", "true")
         .load(BRONZE_PATH)
         .withColumn("source_file", input_file_name().cast("string"))
+        # Match the evolved Iceberg table: amount was appended after country.
+        .select(
+            "event_id",
+            "merchant_id",
+            "user_id",
+            "amount_usd",
+            "currency",
+            "status",
+            "event_timestamp",
+            "source_file",
+            "country",
+            "amount",
+        )
     )
