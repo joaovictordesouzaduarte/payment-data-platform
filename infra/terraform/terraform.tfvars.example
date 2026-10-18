@@ -8,4 +8,6 @@
 # firehose_buffer_interval_seconds = 60
 # alarm_email              = "you@example.com"
 # enable_alarms            = true    # false skips SNS topic + CloudWatch alarms
+# enable_quarantine_notifications = false # independent post-Glue email report
+# quarantine_notification_emails = ["data-ops@example.com"]
 # glue_crawler_schedule    = ""      # e.g. cron(0 * * * ? *); empty = on-demand

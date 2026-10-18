@@ -14,6 +14,7 @@ dependencies = [
   "fastapi>=0.110",
   "uvicorn[standard]>=0.27",
   "python-dotenv>=1.0",
+  "simplejson>=3.19,<4",
 ]
 
 [dependency-groups]
@@ -27,6 +28,7 @@ dev = [
 
 [project.scripts]
 payments-simulator = "payments_gateway.simulator:main"
+payments-chaos-simulator = "payments_gateway.chaos_simulator:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/payments_gateway"]

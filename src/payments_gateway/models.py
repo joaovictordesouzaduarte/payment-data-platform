@@ -8,6 +8,7 @@ from enum import Enum
 from typing import Annotated, Any
 from uuid import uuid4
 
+import simplejson
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 Money = Annotated[Decimal, Field(gt=0, max_digits=18, decimal_places=2)]
@@ -62,8 +63,19 @@ class PaymentEvent(BaseModel):
         return self.merchant_id
 
     def to_kinesis_data(self) -> bytes:
-        """Serialize as newline-delimited JSON bytes for Firehose aggregation."""
-        return (self.model_dump_json() + "\n").encode("utf-8")
+        """Serialize exact Decimal amounts as JSON numbers for Firehose."""
+        payload = self.model_dump(mode="json")
+        payload["amount"] = self.amount
+        return (
+            simplejson.dumps(
+                payload,
+                use_decimal=True,
+                allow_nan=False,
+                ensure_ascii=False,
+                separators=(",", ":"),
+            )
+            + "\n"
+        ).encode("utf-8")
 
     @classmethod
     def json_schema_export(cls) -> dict[str, Any]:

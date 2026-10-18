@@ -1,0 +1,30 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "EmailTopic",
+      "Effect": "Allow",
+      "Action": [
+        "sns:CreateTopic", "sns:DeleteTopic", "sns:GetTopicAttributes",
+        "sns:SetTopicAttributes", "sns:Subscribe", "sns:Unsubscribe",
+        "sns:GetSubscriptionAttributes", "sns:TagResource", "sns:UntagResource",
+        "sns:ListTagsForResource"
+      ],
+      "Resource": "arn:aws:sns:us-east-1:ACCOUNT_ID:rtmsp-dev-payments-alarms"
+    },
+    {
+      "Sid": "MetricAlarms",
+      "Effect": "Allow",
+      "Action": [
+        "cloudwatch:PutMetricAlarm", "cloudwatch:DeleteAlarms", "cloudwatch:DescribeAlarms",
+        "cloudwatch:TagResource", "cloudwatch:UntagResource", "cloudwatch:ListTagsForResource"
+      ],
+      "Resource": [
+        "arn:aws:cloudwatch:us-east-1:ACCOUNT_ID:alarm:rtmsp-dev-firehose-delivery-errors",
+        "arn:aws:cloudwatch:us-east-1:ACCOUNT_ID:alarm:rtmsp-dev-firehose-throttled",
+        "arn:aws:cloudwatch:us-east-1:ACCOUNT_ID:alarm:rtmsp-dev-kinesis-write-throttled",
+        "arn:aws:cloudwatch:us-east-1:ACCOUNT_ID:alarm:rtmsp-dev-kinesis-iterator-age"
+      ]
+    }
+  ]
+}

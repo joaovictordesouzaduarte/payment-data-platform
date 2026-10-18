@@ -63,6 +63,9 @@ resource "aws_glue_job" "payments_sdp" {
   number_of_workers = 2
   timeout           = 20
   max_retries       = 0
+  execution_property {
+    max_concurrent_runs = 1
+  }
 
   command {
     name            = "glueetl"

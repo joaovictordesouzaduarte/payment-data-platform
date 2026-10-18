@@ -1,8 +1,0 @@
-# Local Glue 5.0 ETL runtime (Spark 3.5 / Iceberg 1.7). Production jobs stay Glue 6.0.
-FROM public.ecr.aws/glue/aws-glue-libs:5
-
-WORKDIR /home/hadoop/workspace
-
-USER hadoop
-
-CMD ["-c", "sleep infinity"]

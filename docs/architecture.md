@@ -37,6 +37,23 @@ Athena workgroup  (results on gold/athena-results/)
 
 ## Design choices
 
+The opt-in `payments-chaos-simulator` uses this same Kinesis/Firehose path with
+raw payload mutations (missing/null fields, invalid values and wrong types).
+It reuses producer batching/retries while bypassing model validation for fault
+injection only. `--late-ratio` and `--late-seconds` backdate selected event times;
+Firehose still partitions by delivery time and valid silver/gold records use
+event days. Quality and late selections are independent. `--dry-run` emits
+local NDJSON without AWS access. See README for commands and interpretation of
+quarantine results. This adds no infrastructure or Registry schema changes;
+AWS execution has not been verified.
+
+The FastAPI gateway exposes health and event-generation endpoints. Its only
+publishing route is `POST /payments/events/generate`; the body controls count,
+invalid-event ratio, late-event ratio, delay, and optional fault scenario. The
+API generates valid event payloads first, then mutates selected ones for chaos
+testing. It does not accept arbitrary payment payloads. The CLI simulator stays
+available for paced runs and local NDJSON dry runs.
+
 | Decision | Rationale |
 |---|---|
 | Kinesis Data Streams | Payments source (not a stream processor) |
@@ -57,6 +74,20 @@ Athena workgroup  (results on gold/athena-results/)
 
 AWS resource names still use the `rtmsp-*` prefix so existing stacks are not recreated.
 
+Deployment IAM uses [three scoped policy templates](iam-deploy.md): core,
+optional alarms, and optional quarantine notifications. Replace `ACCOUNT_ID`
+before installation; the templates target `rtmsp-dev` / `us-east-1`. The complete
+stack needs all three. `PassRole` is restricted by role and destination service;
+deployment S3 object access covers pipeline artifacts only. Global-only API
+exceptions are region-restricted, with request-tag checks for crawler creation.
+The core deployment policy allows batched `PutRecords` to the single configured
+payments stream because the gateway and Terraform workspace share root `.env`
+credentials. A separate producer identity can use the narrower Terraform-created
+producer policy. Deployment permissions do not include ad hoc Athena queries.
+Existing execution-role
+policies are unchanged. This is repository configuration, not verified AWS IAM
+or deployment state.
+
 ## Payment event contract
 
 Core fields on `PaymentEvent` (`src/payments_gateway/models.py`):
@@ -75,22 +106,24 @@ Core fields on `PaymentEvent` (`src/payments_gateway/models.py`):
 
 The model uses `extra="allow"`. The simulator may attach any of these extras (~40% of events): `country`, `payment_method`, `channel`, `card_brand`, `fx_rate`.
 
-New events use schema version 3 and publish `amount` as a decimal string in the
-transaction currency. The producer/API enforce positive Decimal values with up
-to 18 digits and 2 fractional digits; inputs with greater fractional precision
-are rejected. Numeric API input is accepted, but strings preserve exact input
-precision. This two-decimal scale is a portfolio convention for all currencies.
+New events use schema version 3 and publish `amount` as a JSON number in the
+transaction currency. The typed producer and normal simulator enforce positive
+Decimal values with up to 18 digits and 2 fractional digits; `simplejson` writes
+the Decimal value as an exact JSON number without converting it to `float`.
+Inputs with greater fractional precision are rejected. The API accepts
+generation controls rather than monetary values. This two-decimal scale is a
+portfolio convention for all currencies.
 The producer rejects the legacy `amount_usd` field. Historical numeric amounts
 are interpreted in their recorded currency, without FX conversion or inference
 of real-world historical units; Spark casts round them to two decimal places.
 
 The Registry declares both monetary fields optional. Legacy `amount_usd` retains
-its numeric type; `amount` is unconstrained because historical JSON schemas are
-open to arbitrary additional properties. Constraining a newly declared property
-can violate `BACKWARD_ALL`. The bronze adapter maps it to Spark `StringType`;
-producer and silver apply strict monetary rules. This preserves old payloads
-without disabling compatibility. AWS registration compatibility is not verified
-by local tests.
+its numeric type; `amount` is also numeric in the Registry schema. The producer
+serializes the validated Decimal as an exact JSON number using `simplejson` with
+`use_decimal=True`; it must not quote the value because the bronze adapter maps
+JSON Schema `number` to Spark `DoubleType`, which reads quoted numeric strings as
+null. Producer and silver apply monetary validation. The current schema and
+producer contract have not been verified against the deployed AWS Registry.
 
 Silver chooses non-null `amount` before `amount_usd`. A malformed non-null
 `amount` is quarantined even when a valid legacy value exists. Accepted silver
@@ -232,6 +265,65 @@ added-file/record counts with unchanged business totals. Missing reports do not
 establish a zero-write or successful run. The Glue driver log stream identifies
 the job run; multiple commits per table are possible. Deploy the YAML and job
 configuration before verifying AWS log delivery.
+
+## Quarantine email reports
+
+When `enable_quarantine_notifications = true`, EventBridge invokes the
+`rtmsp-{environment}-payments-quarantine-report` Lambda on Glue job terminal
+events and every five minutes. The scheduled invocation reconciles the last
+seven days of Glue runs after notification activation to recover missed best-effort state events. A DynamoDB
+lock serializes report processing; the table stores processed JobRunIds for 14
+days and the last successful bronze/quarantine snapshot baseline. Concurrent
+Glue runs are limited to one. Terminal runs send SNS email, including failures;
+successful runs report counts from the `silver_payments_rejected` Iceberg table.
+Its Python entrypoint is `src/reports/quarantine_report_lambda/handler.py`;
+Terraform packages that file as `infra/terraform/build/quarantine-report-lambda.zip`
+through the `archive_file` data source in
+`infra/terraform/quarantine_notifications.tf`.
+
+The Lambda fixes the bronze and quarantine Iceberg snapshot IDs at the Glue run
+completion timestamp, then queries those versions in Athena. “New” means
+rejected rows whose `source_file` first appears since the last successful Glue
+run. The first report counts all source files as new. Files landed during failed
+runs are included in the next successful report. Re-running the same source
+files does not count them again; changed validation rules on old files can
+change the total without changing the new count. A row may have multiple
+rejection reasons, so reason counts can sum above the row count. Missing tables,
+snapshots, or Athena results produce an incomplete email with counts marked
+unavailable. Reports and query IDs are written under
+`s3://{glue}/glue/pipelines/payments/quarantine-reports/{JobRunId}/`.
+
+Set `enable_quarantine_notifications = true` and
+`quarantine_notification_emails = ["data-ops@example.com"]` in
+`infra/terraform/terraform.tfvars`. Each SNS email subscription must be
+confirmed by its recipient. This feature is independent of `enable_alarms`.
+The Lambda needs Glue job-run read, Athena query, Iceberg data and query-result
+S3 access, DynamoDB report-state, SNS publish, and CloudWatch Logs permissions.
+Its execution role reads and writes Athena results only under
+`s3://{gold}/athena-results/` and writes report manifests under the quarantine
+reports prefix. The deploy identity also needs Lambda, EventBridge, DynamoDB, SQS, SNS, Logs,
+and IAM permissions in the core deployment policy plus
+`docs/iam-deploy-quarantine-policy.json` (see [installation](iam-deploy.md)). EventBridge invocation
+failures go to the quarantine event DLQ; Lambda async failures also use that
+queue. Inspect the Lambda log group `/aws/lambda/rtmsp-{environment}-payments-quarantine-report`
+and DLQ before replaying a report.
+
+The Lambda polls Athena for up to 12 minutes per query; each report runs two
+Athena queries, so charges depend on Iceberg metadata and table data scanned.
+Snapshot IDs and query IDs are retained in the S3 report manifest. Do not run
+Iceberg snapshot expiration before report snapshots are at least 30 days old.
+For a missed notification, inspect `report.json`, the DynamoDB run item, and
+the Athena query IDs. Reinvoke the Lambda with any EventBridge event to
+reconcile pending Glue runs; it processes the oldest pending terminal run. An
+incomplete report is checkpointed to prevent repeat emails; after fixing its
+cause, manually invoke the Lambda with `{ "action": "retry", "job_run_id":
+"<JobRunId>" }` to regenerate that report. The retry can send a duplicate email
+if the previous SNS publish succeeded but its DynamoDB checkpoint failed.
+SNS publishing and DynamoDB checkpointing cannot be atomic, so a retry around
+that boundary can send the same JobRunId email twice.
+
+This is repository configuration only; AWS deployment and email delivery have
+not been verified.
 
 ## Later
 

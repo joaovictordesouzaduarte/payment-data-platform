@@ -6,15 +6,26 @@ import logging
 import random
 import time
 from dataclasses import dataclass, field
-from typing import Iterable, Sequence
+from typing import Iterable, Protocol, Sequence
 
 import boto3
 from botocore.exceptions import ClientError
 
 from payments_gateway.config import Settings
-from payments_gateway.models import PaymentEvent
 
 logger = logging.getLogger(__name__)
+
+
+class KinesisEvent(Protocol):
+    """Serialized event interface shared by validated and fault-injection events."""
+
+    @property
+    def event_id(self) -> str: ...
+
+    def partition_key(self) -> str: ...
+
+    def to_kinesis_data(self) -> bytes: ...
+
 
 # Kinesis PutRecords limits
 MAX_RECORDS_PER_PUT = 500
@@ -52,7 +63,7 @@ class PaymentEventProducer:
             )
         self._batch_size = min(self.settings.batch_size, MAX_RECORDS_PER_PUT)
 
-    def publish(self, events: Sequence[PaymentEvent]) -> PublishResult:
+    def publish(self, events: Sequence[KinesisEvent]) -> PublishResult:
         if not events:
             return PublishResult()
 
@@ -64,13 +75,13 @@ class PaymentEventProducer:
             result.failed_event_ids.extend(chunk_result.failed_event_ids)
         return result
 
-    def publish_one(self, event: PaymentEvent) -> PublishResult:
+    def publish_one(self, event: KinesisEvent) -> PublishResult:
         return self.publish([event])
 
     def _chunk_events(
-        self, events: Sequence[PaymentEvent]
-    ) -> Iterable[list[PaymentEvent]]:
-        chunk: list[PaymentEvent] = []
+        self, events: Sequence[KinesisEvent]
+    ) -> Iterable[list[KinesisEvent]]:
+        chunk: list[KinesisEvent] = []
         chunk_bytes = 0
 
         for event in events:
@@ -96,7 +107,7 @@ class PaymentEventProducer:
         if chunk:
             yield chunk
 
-    def _put_records_with_retry(self, events: list[PaymentEvent]) -> PublishResult:
+    def _put_records_with_retry(self, events: list[KinesisEvent]) -> PublishResult:
         records = [
             {
                 "Data": event.to_kinesis_data(),

@@ -2,254 +2,199 @@
   "Version": "2012-10-17",
   "Statement": [
     {
-      "Sid": "S3Medallion",
+      "Sid": "Buckets",
       "Effect": "Allow",
       "Action": [
-        "s3:CreateBucket",
-        "s3:DeleteBucket",
-        "s3:ListBucket",
-        "s3:GetBucketLocation",
-        "s3:GetBucketTagging",
-        "s3:PutBucketTagging",
-        "s3:GetBucketPublicAccessBlock",
-        "s3:PutBucketPublicAccessBlock",
-        "s3:GetEncryptionConfiguration",
-        "s3:PutEncryptionConfiguration",
-        "s3:GetLifecycleConfiguration",
-        "s3:PutLifecycleConfiguration",
-        "s3:GetBucketVersioning",
-        "s3:GetBucketAcl",
-        "s3:GetBucketPolicy",
-        "s3:GetBucketCORS",
-        "s3:GetBucketWebsite",
-        "s3:GetBucketLogging",
-        "s3:GetBucketRequestPayment",
-        "s3:GetBucketObjectLockConfiguration",
-        "s3:GetAccelerateConfiguration",
-        "s3:GetReplicationConfiguration",
-        "s3:GetBucketNotification",
-        "s3:GetBucketOwnershipControls",
-        "s3:GetObject",
-        "s3:PutObject",
-        "s3:DeleteObject",
-        "s3:GetObjectTagging",
-        "s3:PutObjectTagging",
-        "s3:DeleteObjectTagging"
+        "s3:CreateBucket", "s3:DeleteBucket", "s3:ListBucket",
+        "s3:GetBucketLocation", "s3:GetBucketTagging", "s3:PutBucketTagging",
+        "s3:GetBucketPublicAccessBlock", "s3:PutBucketPublicAccessBlock", "s3:GetEncryptionConfiguration",
+        "s3:PutEncryptionConfiguration", "s3:GetLifecycleConfiguration", "s3:GetBucketVersioning",
+        "s3:GetBucketAcl", "s3:GetBucketPolicy", "s3:GetBucketCORS",
+        "s3:GetBucketWebsite", "s3:GetBucketLogging", "s3:GetBucketRequestPayment",
+        "s3:GetBucketObjectLockConfiguration", "s3:GetAccelerateConfiguration", "s3:GetReplicationConfiguration"
       ],
       "Resource": [
-        "arn:aws:s3:::rtmsp-*",
-        "arn:aws:s3:::rtmsp-*/*"
+        "arn:aws:s3:::rtmsp-dev-payments-bronze-????????",
+        "arn:aws:s3:::rtmsp-dev-payments-silver-????????",
+        "arn:aws:s3:::rtmsp-dev-payments-gold-????????",
+        "arn:aws:s3:::rtmsp-dev-payments-glue-????????"
       ]
     },
     {
-      "Sid": "KinesisStream",
+      "Sid": "PipelineArtifacts",
       "Effect": "Allow",
       "Action": [
-        "kinesis:CreateStream",
-        "kinesis:DeleteStream",
-        "kinesis:PutRecord",
-        "kinesis:PutRecords",
-        "kinesis:DescribeStream",
-        "kinesis:DescribeStreamSummary",
-        "kinesis:ListShards",
-        "kinesis:AddTagsToStream",
-        "kinesis:RemoveTagsFromStream",
-        "kinesis:ListTagsForStream",
-        "kinesis:IncreaseStreamRetentionPeriod",
-        "kinesis:DecreaseStreamRetentionPeriod",
-        "kinesis:EnableEnhancedMonitoring",
-        "kinesis:DisableEnhancedMonitoring",
-        "kinesis:UpdateShardCount"
+        "s3:GetObject", "s3:PutObject", "s3:DeleteObject",
+        "s3:GetObjectTagging", "s3:PutObjectTagging", "s3:DeleteObjectTagging"
       ],
-      "Resource": "arn:aws:kinesis:*:*:stream/rtmsp-*"
+      "Resource": [
+        "arn:aws:s3:::rtmsp-dev-payments-glue-????????/glue/pipelines/payments/spark-pipeline.yml",
+        "arn:aws:s3:::rtmsp-dev-payments-glue-????????/glue/pipelines/payments/transformations/*.py"
+      ]
+    },
+    {
+      "Sid": "Kinesis",
+      "Effect": "Allow",
+      "Action": [
+        "kinesis:CreateStream", "kinesis:DeleteStream", "kinesis:DescribeStreamSummary",
+        "kinesis:PutRecords",
+        "kinesis:AddTagsToStream", "kinesis:RemoveTagsFromStream", "kinesis:ListTagsForStream",
+        "kinesis:IncreaseStreamRetentionPeriod", "kinesis:DecreaseStreamRetentionPeriod"
+      ],
+      "Resource": "arn:aws:kinesis:us-east-1:ACCOUNT_ID:stream/rtmsp-dev-payments-events"
     },
     {
       "Sid": "Firehose",
       "Effect": "Allow",
       "Action": [
-        "firehose:CreateDeliveryStream",
-        "firehose:DeleteDeliveryStream",
-        "firehose:DescribeDeliveryStream",
-        "firehose:UpdateDestination",
-        "firehose:TagDeliveryStream",
-        "firehose:UntagDeliveryStream",
+        "firehose:CreateDeliveryStream", "firehose:DeleteDeliveryStream", "firehose:DescribeDeliveryStream",
+        "firehose:UpdateDestination", "firehose:TagDeliveryStream", "firehose:UntagDeliveryStream",
         "firehose:ListTagsForDeliveryStream"
       ],
-      "Resource": "arn:aws:firehose:*:*:deliverystream/rtmsp-*"
+      "Resource": "arn:aws:firehose:us-east-1:ACCOUNT_ID:deliverystream/rtmsp-dev-payments-to-s3"
     },
     {
-      "Sid": "IamForFirehoseAndProducer",
+      "Sid": "DeploymentIAM",
       "Effect": "Allow",
       "Action": [
-        "iam:CreateRole",
-        "iam:DeleteRole",
-        "iam:GetRole",
-        "iam:TagRole",
-        "iam:UntagRole",
-        "iam:ListRoleTags",
-        "iam:PutRolePolicy",
-        "iam:DeleteRolePolicy",
-        "iam:GetRolePolicy",
-        "iam:ListRolePolicies",
-        "iam:ListAttachedRolePolicies",
-        "iam:ListInstanceProfilesForRole",
-        "iam:UpdateAssumeRolePolicy",
-        "iam:PassRole",
-        "iam:CreatePolicy",
-        "iam:DeletePolicy",
-        "iam:GetPolicy",
-        "iam:GetPolicyVersion",
-        "iam:ListPolicyVersions",
-        "iam:CreatePolicyVersion",
-        "iam:DeletePolicyVersion",
-        "iam:TagPolicy",
+        "iam:CreateRole", "iam:DeleteRole", "iam:GetRole",
+        "iam:TagRole", "iam:UntagRole", "iam:ListRolePolicies",
+        "iam:ListAttachedRolePolicies", "iam:ListInstanceProfilesForRole", "iam:UpdateAssumeRolePolicy",
+        "iam:PutRolePolicy", "iam:GetRolePolicy", "iam:DeleteRolePolicy",
+        "iam:CreatePolicy", "iam:DeletePolicy", "iam:GetPolicy",
+        "iam:GetPolicyVersion", "iam:ListPolicyVersions", "iam:CreatePolicyVersion",
+        "iam:DeletePolicyVersion", "iam:TagPolicy", "iam:UntagPolicy",
         "iam:ListPolicyTags"
       ],
       "Resource": [
-        "arn:aws:iam::*:role/rtmsp-*",
-        "arn:aws:iam::*:policy/rtmsp-*"
+        "arn:aws:iam::ACCOUNT_ID:role/rtmsp-dev-payments-firehose",
+        "arn:aws:iam::ACCOUNT_ID:role/rtmsp-dev-payments-glue-crawler",
+        "arn:aws:iam::ACCOUNT_ID:policy/rtmsp-dev-payments-producer"
       ]
     },
     {
-      "Sid": "CloudWatchLogs",
+      "Sid": "PassFirehose",
       "Effect": "Allow",
       "Action": [
-        "logs:CreateLogGroup",
-        "logs:DeleteLogGroup",
-        "logs:CreateLogStream",
-        "logs:DeleteLogStream",
-        "logs:DescribeLogGroups",
-        "logs:DescribeLogStreams",
-        "logs:PutRetentionPolicy",
-        "logs:DeleteRetentionPolicy",
-        "logs:TagResource",
-        "logs:UntagResource",
-        "logs:ListTagsForResource"
+        "iam:PassRole"
       ],
-      "Resource": "*"
+      "Resource": "arn:aws:iam::ACCOUNT_ID:role/rtmsp-dev-payments-firehose",
+      "Condition": {
+        "StringEquals": {
+          "iam:PassedToService": "firehose.amazonaws.com"
+        }
+      }
     },
     {
-      "Sid": "CloudWatchAlarms",
+      "Sid": "PassGlue",
       "Effect": "Allow",
       "Action": [
-        "cloudwatch:PutMetricAlarm",
-        "cloudwatch:DeleteAlarms",
-        "cloudwatch:DescribeAlarms",
-        "cloudwatch:TagResource",
-        "cloudwatch:UntagResource",
-        "cloudwatch:ListTagsForResource"
+        "iam:PassRole"
       ],
-      "Resource": "*"
+      "Resource": "arn:aws:iam::ACCOUNT_ID:role/rtmsp-dev-payments-glue-crawler",
+      "Condition": {
+        "StringEquals": {
+          "iam:PassedToService": "glue.amazonaws.com"
+        }
+      }
     },
     {
-      "Sid": "SnsAlarms",
+      "Sid": "LogGroup",
       "Effect": "Allow",
       "Action": [
-        "sns:CreateTopic",
-        "sns:DeleteTopic",
-        "sns:GetTopicAttributes",
-        "sns:SetTopicAttributes",
-        "sns:Subscribe",
-        "sns:Unsubscribe",
-        "sns:GetSubscriptionAttributes",
-        "sns:ListSubscriptionsByTopic",
-        "sns:TagResource",
-        "sns:UntagResource",
-        "sns:ListTagsForResource"
+        "logs:CreateLogGroup", "logs:DeleteLogGroup", "logs:PutRetentionPolicy",
+        "logs:DeleteRetentionPolicy", "logs:TagResource", "logs:UntagResource",
+        "logs:ListTagsForResource", "logs:DescribeLogStreams"
       ],
-      "Resource": "arn:aws:sns:*:*:rtmsp-*"
+      "Resource": [
+        "arn:aws:logs:us-east-1:ACCOUNT_ID:log-group:/aws/kinesisfirehose/rtmsp-dev-payments-to-s3",
+        "arn:aws:logs:us-east-1:ACCOUNT_ID:log-group:/aws/kinesisfirehose/rtmsp-dev-payments-to-s3:*"
+      ]
     },
     {
-      "Sid": "GlueCatalogCrawlerAndInteractiveSessions",
+      "Sid": "DeliveryLogStream",
       "Effect": "Allow",
       "Action": [
-        "glue:CreateDatabase",
-        "glue:DeleteDatabase",
-        "glue:GetDatabase",
-        "glue:GetDatabases",
-        "glue:UpdateDatabase",
-        "glue:CreateCrawler",
-        "glue:DeleteCrawler",
-        "glue:GetCrawler",
-        "glue:GetCrawlers",
-        "glue:ListCrawlers",
-        "glue:UpdateCrawler",
-        "glue:StartCrawler",
-        "glue:StopCrawler",
-        "glue:GetCrawlerMetrics",
-        "glue:CreateTable",
-        "glue:DeleteTable",
-        "glue:GetTable",
-        "glue:GetTables",
-        "glue:UpdateTable",
-        "glue:BatchCreatePartition",
-        "glue:BatchDeletePartition",
-        "glue:BatchUpdatePartition",
-        "glue:GetPartition",
-        "glue:GetPartitions",
-        "glue:CreatePartition",
-        "glue:DeletePartition",
-        "glue:UpdatePartition",
-        "glue:BatchGetPartition",
-        "glue:GetClassifier",
-        "glue:GetClassifiers",
-        "glue:TagResource",
-        "glue:UntagResource",
-        "glue:GetTags",
-        "glue:CreateSession",
-        "glue:GetSession",
-        "glue:ListSessions",
-        "glue:DeleteSession",
-        "glue:StopSession",
-        "glue:RunStatement",
-        "glue:GetStatement",
-        "glue:ListStatements",
-        "glue:CancelStatement",
-        "glue:CreateJob",
-        "glue:DeleteJob",
-        "glue:GetJob",
-        "glue:GetJobs",
-        "glue:UpdateJob",
-        "glue:StartJobRun",
-        "glue:GetJobRun",
-        "glue:GetJobRuns",
-        "glue:BatchStopJobRun",
-        "glue:CreateRegistry",
-        "glue:DeleteRegistry",
-        "glue:GetRegistry",
-        "glue:ListRegistries",
-        "glue:UpdateRegistry",
-        "glue:CreateSchema",
-        "glue:DeleteSchema",
-        "glue:GetSchema",
-        "glue:GetSchemaByDefinition",
-        "glue:GetSchemaVersion",
-        "glue:ListSchemas",
-        "glue:ListSchemaVersions",
-        "glue:RegisterSchemaVersion",
-        "glue:UpdateSchema"
+        "logs:CreateLogStream", "logs:DeleteLogStream"
       ],
-      "Resource": "*"
+      "Resource": [
+        "arn:aws:logs:us-east-1:ACCOUNT_ID:log-group:/aws/kinesisfirehose/rtmsp-dev-payments-to-s3:log-stream:S3Delivery"
+      ]
     },
     {
-      "Sid": "AthenaWorkgroup",
+      "Sid": "RegionalAPIs",
       "Effect": "Allow",
       "Action": [
-        "athena:CreateWorkGroup",
-        "athena:DeleteWorkGroup",
-        "athena:GetWorkGroup",
-        "athena:UpdateWorkGroup",
-        "athena:ListWorkGroups",
-        "athena:TagResource",
-        "athena:UntagResource",
-        "athena:ListTagsForResource",
-        "athena:StartQueryExecution",
-        "athena:ListDataCatalogs",
-        "athena:ListDatabases",
-        "athena:GetTableMetadata",
-        "athena:ListTableMetadata"
+        "logs:DescribeLogGroups", "kinesis:EnableEnhancedMonitoring", "kinesis:DisableEnhancedMonitoring"
       ],
-      "Resource": "*"
+      "Resource": "*",
+      "Condition": {
+        "StringEquals": {
+          "aws:RequestedRegion": "us-east-1"
+        }
+      }
+    },
+    {
+      "Sid": "Database",
+      "Effect": "Allow",
+      "Action": [
+        "glue:CreateDatabase", "glue:DeleteDatabase", "glue:GetDatabase",
+        "glue:UpdateDatabase"
+      ],
+      "Resource": [
+        "arn:aws:glue:us-east-1:ACCOUNT_ID:catalog",
+        "arn:aws:glue:us-east-1:ACCOUNT_ID:database/rtmsp_dev_payments",
+        "arn:aws:glue:us-east-1:ACCOUNT_ID:table/rtmsp_dev_payments/*",
+        "arn:aws:glue:us-east-1:ACCOUNT_ID:userDefinedFunction/rtmsp_dev_payments/*"
+      ]
+    },
+    {
+      "Sid": "GlueResources",
+      "Effect": "Allow",
+      "Action": [
+        "glue:DeleteCrawler", "glue:GetCrawler", "glue:UpdateCrawler",
+        "glue:StartCrawler", "glue:StopCrawler", "glue:CreateJob",
+        "glue:DeleteJob", "glue:GetJob", "glue:UpdateJob",
+        "glue:StartJobRun", "glue:GetJobRun", "glue:GetJobRuns",
+        "glue:BatchStopJobRun", "glue:TagResource", "glue:UntagResource",
+        "glue:GetTags", "glue:CreateRegistry", "glue:DeleteRegistry",
+        "glue:GetRegistry", "glue:UpdateRegistry", "glue:CreateSchema",
+        "glue:DeleteSchema", "glue:GetSchema", "glue:GetSchemaVersion",
+        "glue:RegisterSchemaVersion", "glue:UpdateSchema"
+      ],
+      "Resource": [
+        "arn:aws:glue:us-east-1:ACCOUNT_ID:database/rtmsp_dev_payments",
+        "arn:aws:glue:us-east-1:ACCOUNT_ID:crawler/rtmsp-dev-payments-bronze-raw",
+        "arn:aws:glue:us-east-1:ACCOUNT_ID:job/rtmsp-dev-payments-sdp",
+        "arn:aws:glue:us-east-1:ACCOUNT_ID:registry/rtmsp-dev-registry",
+        "arn:aws:glue:us-east-1:ACCOUNT_ID:schema/rtmsp-dev-registry/rtmsp-dev-events"
+      ]
+    },
+    {
+      "Sid": "Workgroup",
+      "Effect": "Allow",
+      "Action": [
+        "athena:CreateWorkGroup", "athena:DeleteWorkGroup", "athena:GetWorkGroup",
+        "athena:UpdateWorkGroup", "athena:TagResource", "athena:UntagResource",
+        "athena:ListTagsForResource"
+      ],
+      "Resource": "arn:aws:athena:us-east-1:ACCOUNT_ID:workgroup/rtmsp-dev-payments"
+    },
+    {
+      "Sid": "CreateCrawler",
+      "Effect": "Allow",
+      "Action": [
+        "glue:CreateCrawler"
+      ],
+      "Resource": "*",
+      "Condition": {
+        "StringEquals": {
+          "aws:RequestedRegion": "us-east-1",
+          "aws:RequestTag/Project": "rtmsp",
+          "aws:RequestTag/Environment": "dev",
+          "aws:RequestTag/ManagedBy": "terraform"
+        }
+      }
     }
   ]
 }

@@ -78,7 +78,11 @@ aws_secret_access_key = <secret>
 
 Add `aws_session_token` under `[default]` when using temporary credentials.
 
-The deploy identity must be able to create Kinesis, Firehose, S3, Glue, IAM, Athena, CloudWatch, and SNS. Attach [docs/iam-deploy-policy.json](docs/iam-deploy-policy.json) to that principal. If SNS/CloudWatch alarm permissions are missing, set `enable_alarms = false` in `infra/terraform/terraform.tfvars`.
+Deployment permissions are split into [core](docs/iam-deploy-policy.json), [alarms](docs/iam-deploy-alarms-policy.json) and [quarantine reports](docs/iam-deploy-quarantine-policy.json) customer managed policy templates. Replace `ACCOUNT_ID` with the deployment account ID; templates target `rtmsp-dev` in `us-east-1`. Attach core always, alarms when `enable_alarms = true` (default), and quarantine when `enable_quarantine_notifications = true`; attach all three for the full stack. Keep optional permissions until Terraform has removed their resources. The core policy grants batched `kinesis:PutRecords` only to `rtmsp-dev-payments-events` because the root `.env` credentials are shared by the local gateway and Terraform workspace. The Terraform-created `producer_iam_policy_arn` remains available for a separately credentialed producer. Core does not grant interactive Glue sessions or ad hoc Athena queries.
+
+See [docs/iam-deploy.md](docs/iam-deploy.md) for installation, resource scope and validation limits. S3 object permissions cover only pipeline code/YAML; bucket suffix `????????` matches Terraform's eight-character random suffix and can be replaced by actual bucket names after deployment. `PassRole` is restricted to exact role/service pairs. Only log-group discovery, Kinesis enhanced-monitoring changes and crawler creation require `Resource: "*"`; all are region-restricted, and crawler creation requires the existing Terraform project/environment/managed-by tags. Execution-role policies are unchanged, and deployment IAM administration is not a permissions boundary. Policies were statically reviewed against provider 6.56.0 and AWS authorization metadata, not installed or verified by AWS deployment. Quarantine recipients remain controlled by `quarantine_notification_emails`.
+
+For `AccessDenied` on SNS topics, quarantine Lambda IAM role, or Lambda log group, verify that the alarms/quarantine complements are attached to the deploy identity and each `ACCOUNT_ID` placeholder matches that account before expanding core permissions.
 
 ### App environment
 
@@ -143,6 +147,7 @@ data/                      Local bronze samples + Hadoop Iceberg warehouse (giti
 | `pipelines/sdp/payments/transformations/` | Registry-backed bronze template, silver + quarantine, daily gold aggregates |
 | `infra/terraform/schemas/payment_event.json` | JSON Registry contract used to build the bronze Spark schema |
 | `pipelines/sdp/payments/spark-pipeline.yml.tftpl` | Catalog, pipeline state, and Iceberg warehouse configuration |
+| `src/reports/quarantine_report_lambda/handler.py` | SNS quarantine report Lambda entrypoint; packaged by `infra/terraform/quarantine_notifications.tf` |
 | `infra/terraform/` | All AWS resources; local state on the host bind-mount |
 
 ## Payment event contract
@@ -163,9 +168,9 @@ The producer's core contract is below. `PaymentEvent` uses `extra="allow"`, pres
 
 The simulator adds 1–3 optional fields to approximately 40% of events: `country`, `payment_method`, `channel`, `card_brand`, and `fx_rate`. Do not introduce additional business fields without a task requirement.
 
-`amount` is a positive Python `Decimal` constrained to `decimal(18,2)` precision, serialized as a JSON string. API requests accept decimal strings or numbers; use strings for exact monetary input. The new producer rejects `amount_usd` and schema versions below 3. Historical `amount_usd` is a read-only legacy alias, interpreted in the recorded `currency` for this synthetic portfolio; no historical FX conversion or real-world unit inference is performed. The two-decimal scale is a portfolio convention for all supported currencies, not a currency-specific minor-unit implementation. Legacy numbers are rounded by Spark's decimal cast; new producer inputs with more than two decimal places are rejected.
+`amount` is a positive Python `Decimal` constrained to `decimal(18,2)` precision and serialized as an exact JSON number. `simplejson` with `use_decimal=True` writes the Decimal token without converting it to `float`; the chaos simulator uses the same serializer for valid events. API requests accept decimal strings or numbers; use strings for exact monetary input. The new producer rejects `amount_usd` and schema versions below 3. Historical `amount_usd` is a read-only legacy alias, interpreted in the recorded `currency` for this synthetic portfolio; no historical FX conversion or real-world unit inference is performed. The two-decimal scale is a portfolio convention for all supported currencies, not a currency-specific minor-unit implementation. Legacy numbers are rounded by Spark's decimal cast; new producer inputs with more than two decimal places are rejected.
 
-The Registry keeps `amount_usd` as optional numeric and adds optional `amount` without a type constraint. The older open JSON schemas permit arbitrary unknown fields, so constraining a newly declared field is not generally `BACKWARD_ALL` compatible. Bronze fetches the latest Registry schema inside `ingest_bronze` and maps its properties to Spark types there; unconstrained `amount` defaults to `StringType`, while numeric JSON amounts remain readable. Producer and silver enforce monetary validation. Silver chooses non-null `amount` first, otherwise legacy `amount_usd`; invalid non-null new amounts are quarantined rather than falling back. Missing/invalid monetary reason names are now `missing_amount` / `invalid_amount`. The accepted silver exposes canonical decimal `amount` and keeps `amount_decimal` for existing aggregations; `amount_usd` is retained only in bronze and quarantine.
+The Registry keeps `amount_usd` as optional numeric and declares optional `amount` as numeric in `infra/terraform/schemas/payment_event.json`. Bronze fetches the latest Registry schema inside `ingest_bronze` and maps its properties to Spark types there (`number` maps to `DoubleType`). The producer must emit `amount` as a JSON number to match this read schema; quoted numeric strings are read as null. Producer and silver enforce monetary validation. Silver chooses non-null `amount` first, otherwise legacy `amount_usd`; invalid non-null new amounts are quarantined rather than falling back. Missing/invalid monetary reason names are now `missing_amount` / `invalid_amount`. The accepted silver exposes canonical decimal `amount` and keeps `amount_decimal` for existing aggregations; `amount_usd` is retained only in bronze and quarantine.
 
 The Registry JSON schema contains the core payload fields plus `country` and `source_file`, but excludes `schema_version` and `ingest_source`. Bronze loads its latest version with `glue:GetSchemaVersion`; schema compatibility is `BACKWARD_ALL`. `source_file` is populated from the input file path. Extras outside the Registry contract remain in raw S3 JSON but are not projected into silver. `country` represents the merchant's country. Silver keeps it; gold substitutes the internal value `unknown` when it is null. Transaction currency remains the explicit `currency` field. This repository behavior takes effect in AWS after deploying the transformation and refreshing the SDP gold views.
 
@@ -205,7 +210,7 @@ Gold metrics are `amount` (sum of `amount_decimal`), `txn_count`, and `unique_us
 
 Gold groups by `status_normalized` and `currency_normalized`, exposing them as `status` and `currency`. Amounts and amount bands use transaction-currency units: do not sum across currencies or label non-USD amounts as USD. `unique_users` is not additive across groups. Pipeline YAML sets `spark.sql.session.timeZone` to `UTC` for consistent timestamp parsing and event-day partitions. Terraform renders `transformations/01_bronze.py.tftpl` and uploads the resulting Python file as `transformations/01_bronze.py`.
 
-Deploy the reader/schema before starting the new producer. Existing streaming bronze must contain both monetary columns; use a coordinated full rebuild/full refresh if needed and preserve `payments/raw/`. An Athena DROP on Iceberg deletes table data; no drop, checkpoint reset, schema registration, deploy, or AWS job run has been executed by these repository edits.
+Deploy the producer before generating new events. Existing raw files whose `amount` values are quoted strings remain incompatible with the numeric Registry schema and will continue to read as null if replayed unchanged; changing the producer affects only future events. To include those historical events, republish corrected numeric payloads or apply an explicit compatibility transform before bronze parsing. Preserve `payments/raw/`; no AWS schema registration, deploy, replay, or job run has been executed by these repository edits.
 
 `dim_date` provides `date_key`, `full_date`, `calendar_date`, year / quarter / month / week / day attributes, and month-, quarter-, and year-end flags. `day_of_week` is ISO-style Monday=1 through Sunday=7. It is intentionally unpartitioned because it contains a small fixed calendar.
 
@@ -215,15 +220,38 @@ Deploy the reader/schema before starting the new producer. Existing streaming br
 
 Terraform creates four S3 buckets: `bronze`, `silver`, `gold`, and `glue`, with AES256 encryption and public access blocked. Current `glue_job.tf` and the pipeline YAML place code at `s3://{glue}/glue/pipelines/payments/`, state below its `state/` prefix, and the Iceberg warehouse at `s3://{glue}/iceberg-warehouse`. Athena results use `s3://{gold}/athena-results/`. Resolve bucket names from `medallion_buckets`; logical silver/gold layers do not imply their tables use the corresponding buckets. The architecture document uses these same paths.
 
-Terraform uploads all four transformation files and the rendered pipeline YAML. The configured Glue job uses version 6.0, two `G.1X` workers, a 20-minute timeout, no retries, and the shared crawler/SDP IAM role.
+Terraform uploads all four transformation files and the rendered pipeline YAML. The configured Glue job uses version 6.0, two `G.1X` workers, a 20-minute timeout, no retries, one concurrent run, and the shared crawler/SDP IAM role.
 
 Pipeline write logging uses Iceberg's bundled `org.apache.iceberg.metrics.LoggingMetricsReporter`, explicitly selected by `spark.sql.catalog.${catalog}.metrics-reporter-impl` in the YAML. The Glue job's existing `--conf` argument also sets `spark.log.level=INFO` at startup. Each Iceberg `CommitReport` records table name, snapshot ID, operation, and added/removed/total data-file and record counts for all persisted bronze/silver/gold tables, quarantine, and dimensions. This is a catalog setting; do not add Spark actions inside SDP query functions to log counts. Temporary views have no commits. These metrics count output files and rewritten rows, not new business events or Firehose source files. Silver/gold full replacement can add files without increasing GMV. A missing report is not proof of zero writes or job success; inspect run state and snapshots. Query the Glue job-run driver stream in the default Spark/system log group (`/aws-glue/jobs/error`). No new resources, dependencies, storage paths, or IAM permissions are introduced. Deploy the existing `pipeline_yaml` object and updated Glue job to apply the logging configuration; AWS log delivery has not been verified.
 
 The optional raw Athena DDL in `sql/athena/bronze/payment_events_raw.sql` now includes string `amount` alongside numeric `amount_usd`, for direct old/new raw exploration. It is separate from SDP's Registry-backed Iceberg table. Its `CREATE IF NOT EXISTS` does not update an existing external table; publish a compatible catalog update or recreate that optional raw table deliberately. Bucket placeholders must be resolved from `medallion_buckets`. This reference DDL change has not been applied to AWS.
 
+Quarantine email reporting is opt-in: set `enable_quarantine_notifications = true` and a non-empty `quarantine_notification_emails` list in the ignored Terraform tfvars file. The `rtmsp-{environment}-payments-quarantine-report` Lambda source is `src/reports/quarantine_report_lambda/handler.py`; Terraform packages it to `infra/terraform/build/quarantine-report-lambda.zip` using `archive_file` in `infra/terraform/quarantine_notifications.tf`. The Lambda is invoked on Glue terminal state events and every five minutes to reconcile missed events from activation through the previous seven days. It serializes work with DynamoDB and reports one oldest unprocessed run per invocation. SNS topic and subscriptions are separate from the alarms topic; each email recipient must confirm the SNS subscription. Glue failures send run state and diagnostic text with counts unavailable.
+
+Successful reports query `silver_payments_rejected` and `bronze_payments` at Iceberg snapshot IDs selected at the Glue completion time. Total counts include all rejected rows; new counts include rows whose `source_file` first appeared since the prior successful Glue run. The first report treats all existing files as new. Failed-run bronze files are included in the next successful report. A change to validation on previously processed files can change the total without changing new counts. Every rejection reason is counted; a row may have multiple reasons. Snapshots must remain available for at least 30 days. Reports and Athena query IDs are stored at `s3://{glue}/glue/pipelines/payments/quarantine-reports/{JobRunId}/`; Athena results stay under `s3://{gold}/athena-results/`. The Lambda execution role can read and write Athena query results only under that results prefix, and can write report manifests only under the quarantine reports prefix. Each report uses two Athena queries and incurs scan charges. Incomplete snapshots/queries are reported with counts unavailable, never as zero. Inspect the report manifest, Lambda log group `/aws/lambda/rtmsp-{environment}-payments-quarantine-report`, and quarantine event DLQ before recovery. Incomplete reports are checkpointed to prevent repeat emails; after fixing the cause, invoke the Lambda manually with `{"action":"retry","job_run_id":"<JobRunId>"}`. EventBridge and Lambda SNS delivery plus DynamoDB checkpointing are not atomic, so a retry at the publish boundary can duplicate an email with the same JobRunId. AWS deployment and email delivery are not verified by repository changes.
+
 Bronze crawler is on-demand by default (optional `glue_crawler_schedule`) and incremental (`CRAWL_NEW_FOLDERS_ONLY`) on `payments/raw/` only. Do not crawl silver or gold — Iceberg metadata is the catalog. If Hive/Parquet tables already exist under the SDP table names, drop them before the job runs. Athena workgroup: `rtmsp-dev-payments`.
 
 ## Common commands
+
+`payments-chaos-simulator` is an opt-in raw fault injector using the existing
+Kinesis stream and producer batching/retries. It bypasses model validation only
+for its own mutated payloads; the API and normal simulator retain validation.
+Use `uv run payments-chaos-simulator --dry-run --count 100` for local NDJSON
+without credentials or AWS calls. For publishing, the existing `.env` and AWS
+prerequisites apply. `--bad-ratio` (default 0.3) and `--late-ratio` (default 0.2)
+are independent probabilities; `--late-seconds` (default 86400, maximum 365 days)
+backdates event time rather than delaying execution. Use `--bad-ratio 0
+--late-ratio 1 --late-seconds 172800` to isolate valid two-day-late events.
+`--count` bounds attempts including exhausted failures; `--rate` controls sending
+speed. Missing/null/blank fields, invalid domains/amounts/timestamps, nested wrong
+types and multiple faults are available through `--scenario`; see README.
+Transport partition keys retain the original valid merchant even if its payload
+field is removed or corrupted. Bronze parsing can coerce/null malformed values;
+generated fault counts do not guarantee quarantine counts. Firehose partitions
+remain delivery-time based; valid late records use historical silver/gold days
+after SDP runs. No resource, IAM, schema or pipeline changes are required, and
+AWS behavior has not been verified by this local implementation.
 
 The status view is now named `dim_status` (formerly `dim_payment_status`). Its natural key remains `status_code`. Publish `04_dimensions.py` and rerun SDP to materialize the new name; this code change does not rename or delete an existing AWS table. Check for a legacy `dim_status` table before deployment, since its old SQL schema differs from the SDP schema.
 
@@ -233,7 +261,7 @@ SDP reference dimensions use module-level `StructType` schemas, not DDL strings 
 # App
 uv sync --group dev
 uv run payments-simulator --rate 10 --duration 30
-uv run uvicorn payments_gateway.api:app --reload --port 8080
+PYTHONPATH=src uv run --no-sync uvicorn payments_gateway.api:app --reload --reload-dir src/payments_gateway --port 8080
 
 # Quality
 uv run pytest -q

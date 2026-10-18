@@ -31,10 +31,11 @@ configuration does not prove successful AWS deployment.
 | Gold | `fact_payments` and `fact_payments_rejected`, daily merchant/status/country/currency aggregates |
 | Dimensions | `dim_date`, `dim_country`, `dim_status` |
 
-New producer/API/simulator events use version 3 and `amount`, a positive Decimal
-in the transaction's `currency`, serialized as a JSON string to preserve
-precision. The portfolio uses at most 18 digits and 2 decimal places for every
-supported currency; this is not a currency-specific minor-unit system. Inputs
+Generated producer/API/simulator events use version 3 and `amount`, a positive
+Decimal in the transaction's `currency`, serialized as an exact JSON number to
+match the Registry contract and preserve its decimal digits on the wire. The
+portfolio uses at most 18 digits and 2 decimal places for every supported
+currency; this is not a currency-specific minor-unit system. Inputs
 with more than two fractional digits are rejected by the producer. No FX
 conversion occurs. GMV includes only captured amounts and must retain currency.
 
@@ -53,7 +54,8 @@ counts are not additive across gold groups.
 - Docker through WSL on Windows for Terraform and local AWS CLI operations.
 - Gitignored root `.aws/config` and `.aws/credentials`, plus `.env` copied from
   `.env.example`. Never commit credentials or Terraform state.
-- A deploy identity with [the deploy permissions](docs/iam-deploy-policy.json).
+- A deploy identity with the [core policy and enabled-feature complements](docs/iam-deploy.md).
+  Replace `ACCOUNT_ID` in the policy templates before attaching them.
 
 The Terraform workspace loads `.env`; its entrypoint writes shared AWS config
 inside the container. All local Terraform/AWS CLI commands run there, not on
@@ -79,8 +81,12 @@ terraform output
 Review before applying the saved plan. Useful outputs are `kinesis_stream_name`,
 `medallion_buckets`, `glue_payments_sdp_job`, `glue_schema_registry`,
 `glue_events_schema`, and `athena_workgroup`. Producer permissions are exposed
-through `producer_iam_policy_arn`. Disable alarms with `enable_alarms = false`
-when the deploy identity lacks their required permissions.
+through `producer_iam_policy_arn` for a separately credentialed producer. The
+core deployment policy also allows batched `PutRecords` to the configured
+payments stream used by the gateway's root `.env`. Attach the alarms complement
+when `enable_alarms = true`, and the quarantine
+complement when `enable_quarantine_notifications = true`. Keep complements
+until Terraform has removed their resources when disabling a feature.
 
 The code/state and Iceberg warehouse use the **glue** bucket. Athena results use
 `gold/athena-results/`. Logical silver/gold layers do not imply physical storage
@@ -88,27 +94,58 @@ in those buckets. Terraform renders `01_bronze.py.tftpl` and resolves its
 placeholders before upload; the uploaded file is named `01_bronze.py`.
 Terraform uploads all four transformations and pipeline YAML.
 
+Quarantine reports can be enabled separately from CloudWatch alarms in
+`infra/terraform/terraform.tfvars`:
+
+```hcl
+enable_quarantine_notifications = true
+quarantine_notification_emails  = ["data-ops@example.com"]
+```
+
+Each recipient must confirm the SNS subscription email. After each Glue
+terminal run, the report includes total quarantine rows and new rejected rows
+by `source_file`, with counts for each rejection reason. The initial report
+counts existing history as new. See [docs/architecture.md](docs/architecture.md)
+for reconciliation, snapshots, cost, and recovery details.
+
 A normal job run does not replay files already checkpointed.
 
-## Publish demo events
+## Generate demo events
 
 ```bash
 uv sync --group dev
 # Create/edit .env with the stream and AWS settings before publishing
 uv run payments-simulator --rate 10 --duration 30
-uv run uvicorn payments_gateway.api:app --reload --port 8080
+PYTHONPATH=src uv run --no-sync uvicorn payments_gateway.api:app --reload --reload-dir src/payments_gateway --port 8080
 ```
 
-Example request:
+The API generates payment events; it does not accept arbitrary payment payloads.
+Send generation settings to `/payments/events/generate`. The defaults generate
+25 valid events:
 
 ```bash
-curl -X POST http://127.0.0.1:8080/payments/events \
+curl -X POST http://127.0.0.1:8080/payments/events/generate \
   -H 'Content-Type: application/json' \
-  -d '{"merchant_id":"mrc_0001","user_id":"usr_000001","amount":"25.50","currency":"BRL","status":"captured"}'
+  -d '{"count":100}'
 ```
 
-The API no longer accepts an `amount_usd`-only request. New payloads use version
-3 by default. Events may carry simulator extras, with unchanged business fields.
+To send a mix of invalid and late-arriving events, configure independent ratios.
+They are probabilities, so actual counts can vary around the requested
+proportions.
+`scenario` selects the fault applied to generated invalid events; when omitted,
+the generator cycles through its fault scenarios.
+
+```bash
+curl -X POST http://127.0.0.1:8080/payments/events/generate \
+  -H 'Content-Type: application/json' \
+  -d '{"count":100,"bad_ratio":0.4,"late_ratio":0.3,"late_seconds":172800,"scenario":"invalid-amount"}'
+```
+
+The request body contains generation controls, not a payment event. The response
+includes attempted, succeeded, failed, corrupted and backdated counts, plus up
+to five sample payloads. New valid events use version 3 and may carry simulator
+extras. The opt-in `payments-chaos-simulator` CLI remains available for larger
+or paced demos and for local NDJSON dry runs.
 
 After Firehose lands the data (buffer defaults 64 MiB / 60 seconds), run inside
 the Terraform workspace:
@@ -160,3 +197,53 @@ required to demonstrate the current portfolio pipeline.
 ## License
 
 [MIT](LICENSE)
+
+## Fault injection and late arrivals
+
+`payments-chaos-simulator` publishes raw NDJSON to the existing Kinesis stream,
+using the same `.env`, batching and retry settings as the normal simulator.
+It deliberately bypasses `PaymentEvent` validation after creating a valid base
+event. The API validates generation parameters, then mutates selected generated
+events according to the requested chaos settings.
+
+```bash
+# Preview locally: no credentials or AWS calls; stdout is NDJSON, stderr is a summary.
+uv run payments-chaos-simulator --dry-run --count 100 --bad-ratio 0.4 --late-ratio 0.3 --late-seconds 172800
+
+# Publish 500 events at 10 events/s: approximately 40% bad, 30% two days late.
+uv run payments-chaos-simulator --count 500 --rate 10 --bad-ratio 0.4 --late-ratio 0.3 --late-seconds 172800
+
+# Only valid late arrivals, all dated seven days before sending.
+uv run payments-chaos-simulator --count 100 --bad-ratio 0 --late-ratio 1 --late-seconds 604800
+
+# Target one quality fault in every event.
+uv run payments-chaos-simulator --count 100 --bad-ratio 1 --scenario missing
+```
+
+`--bad-ratio` (default 0.3) and `--late-ratio` (default 0.2) are independent
+probabilities, not exact quotas. Both accept 0..1. `--late-seconds` defaults to
+86400 and accepts positive delays up to 365 days. It backdates event time;
+it does not sleep for that delay. `--rate` controls sending speed; dry-run skips
+pacing. `--count` counts generated attempts even when delivery fails. Exhausted
+record retries produce a nonzero exit code. Summary counters describe generated
+faults and backdating, not observed lake rejection or delivery guarantees.
+
+Without `--scenario`, faulty events cycle through `missing`, `null`, `blank`,
+`invalid-status`, `invalid-currency`, `invalid-amount`, `non-positive-amount`,
+`overflow-amount`, `invalid-timestamp`, `wrong-type`, and `multiple`.
+Missing/null/blank/wrong-type cases rotate over event ID, merchant ID, user ID,
+amount, status and timestamp. Wrong types use a nested JSON object; multiple
+faults combine a missing user, null merchant, invalid amount/status/currency.
+Transport routing retains the original merchant key even when the payload's
+merchant is broken. All records remain syntactically valid JSON; no new business
+fields or Registry versions are introduced.
+
+Late and quality selections can overlap. A corrupted/missing timestamp cannot
+retain a usable old event time. Use `--bad-ratio 0` to isolate late handling.
+Firehose delivery partitions stay current; valid late events should appear in
+historical silver event-day partitions and corresponding gold dates after SDP
+runs. There is no additional watermark or lateness rejection in this script.
+Malformed values may be coerced or nulled by the bronze reader before silver;
+unknown extras alone are allowed by the open contract and are not necessarily
+quarantined. Inspect raw S3 and `silver_payments_rejected.rejection_reasons` to
+verify outcomes. The script does not deploy resources or run crawler/SDP jobs.

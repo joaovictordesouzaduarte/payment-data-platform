@@ -1,0 +1,99 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "EmailTopic",
+      "Effect": "Allow",
+      "Action": [
+        "sns:CreateTopic", "sns:DeleteTopic", "sns:GetTopicAttributes",
+        "sns:SetTopicAttributes", "sns:Subscribe", "sns:Unsubscribe",
+        "sns:GetSubscriptionAttributes", "sns:TagResource", "sns:UntagResource",
+        "sns:ListTagsForResource"
+      ],
+      "Resource": "arn:aws:sns:us-east-1:ACCOUNT_ID:rtmsp-dev-payments-quarantine-report-email"
+    },
+    {
+      "Sid": "ReportRole",
+      "Effect": "Allow",
+      "Action": [
+        "iam:CreateRole", "iam:DeleteRole", "iam:GetRole",
+        "iam:TagRole", "iam:UntagRole", "iam:ListRolePolicies",
+        "iam:ListAttachedRolePolicies", "iam:ListInstanceProfilesForRole", "iam:UpdateAssumeRolePolicy",
+        "iam:PutRolePolicy", "iam:GetRolePolicy", "iam:DeleteRolePolicy"
+      ],
+      "Resource": "arn:aws:iam::ACCOUNT_ID:role/rtmsp-dev-payments-quarantine-report-lambda"
+    },
+    {
+      "Sid": "PassLambda",
+      "Effect": "Allow",
+      "Action": [
+        "iam:PassRole"
+      ],
+      "Resource": "arn:aws:iam::ACCOUNT_ID:role/rtmsp-dev-payments-quarantine-report-lambda",
+      "Condition": {
+        "StringEquals": {
+          "iam:PassedToService": "lambda.amazonaws.com"
+        }
+      }
+    },
+    {
+      "Sid": "LogGroup",
+      "Effect": "Allow",
+      "Action": [
+        "logs:CreateLogGroup", "logs:DeleteLogGroup", "logs:PutRetentionPolicy",
+        "logs:DeleteRetentionPolicy", "logs:TagResource", "logs:UntagResource",
+        "logs:ListTagsForResource"
+      ],
+      "Resource": [
+        "arn:aws:logs:us-east-1:ACCOUNT_ID:log-group:/aws/lambda/rtmsp-dev-payments-quarantine-report",
+        "arn:aws:logs:us-east-1:ACCOUNT_ID:log-group:/aws/lambda/rtmsp-dev-payments-quarantine-report:*"
+      ]
+    },
+    {
+      "Sid": "ReportFunction",
+      "Effect": "Allow",
+      "Action": [
+        "lambda:CreateFunction", "lambda:DeleteFunction", "lambda:GetFunction",
+        "lambda:GetFunctionConfiguration", "lambda:GetFunctionCodeSigningConfig", "lambda:ListVersionsByFunction",
+        "lambda:GetPolicy", "lambda:UpdateFunctionCode", "lambda:UpdateFunctionConfiguration",
+        "lambda:AddPermission", "lambda:RemovePermission", "lambda:PutFunctionEventInvokeConfig",
+        "lambda:DeleteFunctionEventInvokeConfig", "lambda:GetFunctionEventInvokeConfig", "lambda:TagResource",
+        "lambda:UntagResource"
+      ],
+      "Resource": "arn:aws:lambda:us-east-1:ACCOUNT_ID:function:rtmsp-dev-payments-quarantine-report"
+    },
+    {
+      "Sid": "ReportRules",
+      "Effect": "Allow",
+      "Action": [
+        "events:PutRule", "events:DeleteRule", "events:DescribeRule",
+        "events:PutTargets", "events:RemoveTargets", "events:ListTargetsByRule",
+        "events:TagResource", "events:UntagResource", "events:ListTagsForResource"
+      ],
+      "Resource": [
+        "arn:aws:events:us-east-1:ACCOUNT_ID:rule/rtmsp-dev-payments-quarantine-report-job-state",
+        "arn:aws:events:us-east-1:ACCOUNT_ID:rule/rtmsp-dev-payments-quarantine-report-reconcile"
+      ]
+    },
+    {
+      "Sid": "ReportState",
+      "Effect": "Allow",
+      "Action": [
+        "dynamodb:CreateTable", "dynamodb:DeleteTable", "dynamodb:DescribeTable",
+        "dynamodb:DescribeContinuousBackups", "dynamodb:DescribeTimeToLive", "dynamodb:UpdateTimeToLive",
+        "dynamodb:TagResource", "dynamodb:UntagResource", "dynamodb:ListTagsOfResource"
+      ],
+      "Resource": "arn:aws:dynamodb:us-east-1:ACCOUNT_ID:table/rtmsp-dev-payments-quarantine-report-state"
+    },
+    {
+      "Sid": "DeadLetterQueue",
+      "Effect": "Allow",
+      "Action": [
+        "sqs:CreateQueue", "sqs:DeleteQueue", "sqs:GetQueueAttributes",
+        "sqs:SetQueueAttributes", "sqs:TagQueue", "sqs:UntagQueue",
+        "sqs:ListQueueTags"
+      ],
+      "Resource": "arn:aws:sqs:us-east-1:ACCOUNT_ID:rtmsp-dev-payments-quarantine-report-events-dlq"
+    }
+  ]
+}

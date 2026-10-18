@@ -51,3 +51,20 @@ variable "glue_crawler_schedule" {
   type        = string
   default     = ""
 }
+
+variable "enable_quarantine_notifications" {
+  description = "Create post-Glue quarantine reports through SNS email."
+  type        = bool
+  default     = false
+}
+
+variable "quarantine_notification_emails" {
+  description = "Email recipients for Glue quarantine reports. Each SNS subscription must be confirmed."
+  type        = list(string)
+  default     = ["jduarte.studies@gmail.com"]
+
+  validation {
+    condition     = length(var.quarantine_notification_emails) == length(distinct(var.quarantine_notification_emails))
+    error_message = "quarantine_notification_emails must not contain duplicates."
+  }
+}

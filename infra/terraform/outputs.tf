@@ -60,6 +60,11 @@ output "alarms_sns_topic_arn" {
   value       = one(aws_sns_topic.payments_alarms[*].arn)
 }
 
+output "quarantine_reports_sns_topic_arn" {
+  description = "SNS topic for post-Glue quarantine reports (null when disabled)."
+  value       = one(aws_sns_topic.quarantine_reports[*].arn)
+}
+
 output "glue_database_name" {
   description = "Glue Data Catalog database for payments (bronze crawler target)."
   value       = aws_glue_catalog_database.payments.name

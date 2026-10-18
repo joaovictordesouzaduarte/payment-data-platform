@@ -105,8 +105,8 @@ def test_decimal_wire_precision_and_legacy_field_rejection():
         status="captured",
     )
     assert event.amount == Decimal("9999999999999999.99")
-    payload = json.loads(event.to_kinesis_data())
-    assert payload["amount"] == "9999999999999999.99"
+    payload = json.loads(event.to_kinesis_data(), parse_float=Decimal)
+    assert payload["amount"] == Decimal("9999999999999999.99")
     assert payload["currency"] == "BRL"
     assert payload["schema_version"] == 3
     assert "amount_usd" not in payload
