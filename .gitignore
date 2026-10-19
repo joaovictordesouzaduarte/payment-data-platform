@@ -23,3 +23,5 @@ infra/terraform/*.tfvars
 infra/terraform/build/
 data/*
 .cache/
+# Original notification screenshot contains a personal unsubscribe link.
+docs/image.png

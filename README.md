@@ -15,26 +15,115 @@ This is a **batch** platform, not a real-time event processor. Kinesis receives 
 
 ## Architecture
 
-```text
-Simulator CLI ─┐
-               ├─ PaymentEventProducer ─ PutRecords ─► Kinesis Data Streams
-FastAPI ───────┘                                       │
-                                                      ▼
-                                              Kinesis Data Firehose
-                                                      │
-                                          GZIP NDJSON in S3 bronze (raw)
-                                                      │
-                           Glue Schema Registry ──────┤ latest JSON schema
-                                                      ▼
-                                              Glue 6.0 SDP
-                                  bronze → silver + quarantine → gold
-                                                      │
-                              Iceberg v2 in Glue catalog/warehouse
-                                                      ▼
-                                               Athena
+### Data flow
+
+```mermaid
+flowchart TB
+    producer["Payment gateway<br/>FastAPI / CLI simulators"]
+    kinesis["Kinesis Data Streams"]
+    firehose["Amazon Data Firehose<br/>64 MiB / 60s buffer"]
+    raw[("S3 bronze · raw landing<br/>GZIP NDJSON · delivery-hour partitions")]
+    registry["Glue Schema Registry<br/>Latest JSON schema · BACKWARD_ALL"]
+    crawler["Glue crawler · optional<br/>Raw files only"]
+    catalog["Glue Data Catalog<br/>Raw and Iceberg metadata"]
+    subgraph sdp["Glue 6.0 SDP · batch job"]
+        bronze["bronze_payments"]
+        silver["silver_payments<br/>Validated and deduplicated"]
+        rejected["silver_payments_rejected<br/>Data-quality quarantine"]
+        gold["Gold daily aggregates<br/>fact_payments / fact_payments_rejected"]
+        dims["Shared dimensions<br/>dim_date / dim_country / dim_status"]
+        bronze --> silver --> gold
+        bronze --> rejected
+    end
+    warehouse[("S3 glue · Iceberg v2 warehouse<br/>iceberg-warehouse/")]
+    athena["Athena workgroup<br/>rtmsp-dev-payments"]
+    results[("S3 gold<br/>athena-results/")]
+    producer -->|"PutRecords · merchant_id"| kinesis
+    kinesis --> firehose --> raw
+    raw -->|"Read new files"| bronze
+    registry -.->|"Read schema"| bronze
+    raw -.-> crawler -.-> catalog
+    sdp -->|"Persist tables"| warehouse
+    sdp -.->|"Register tables"| catalog
+    warehouse -->|"Query table data"| athena
+    catalog -.->|"Resolve metadata"| athena
+    athena --> results
+    classDef storage fill:#e8f5e9,stroke:#2e7d32,color:#16351c
+    classDef compute fill:#fff3e0,stroke:#b45f06,color:#663600
+    classDef metadata fill:#ede7f6,stroke:#673ab7,color:#35205c
+    class raw,warehouse,results storage
+    class producer,bronze,silver,rejected,gold,dims compute
+    class registry,catalog,crawler metadata
 ```
 
-Terraform creates the AWS resources: Kinesis, Firehose, S3 buckets, Glue Schema Registry, the bronze crawler, Glue 6.0 job, catalog and Iceberg tables, Athena workgroup, and IAM. The SDP pipeline reads the latest Registry contract to define the bronze schema.
+Solid arrows show data movement; dotted arrows show schema and catalog dependencies.
+The crawler is optional for raw Athena queries; SDP reads S3 directly. All SDP
+layers persist in the **glue bucket's Iceberg warehouse**.
+`fact_payments_rejected` aggregates failed payment statuses;
+`silver_payments_rejected` contains data-quality failures.
+
+### Job-run reports and operational monitoring
+
+```mermaid
+flowchart TB
+    job["Glue SDP job run"]
+    subgraph reporting["Optional quarantine reports · enable_quarantine_notifications = true"]
+        events["EventBridge · terminal states<br/>SUCCEEDED / FAILED / TIMEOUT / STOPPED"]
+        timer["EventBridge schedule<br/>Every 5 minutes"]
+        reporter["Lambda · quarantine report<br/>Reconcile oldest pending run"]
+        state[("DynamoDB · report state<br/>Lock / run checkpoints / baseline")]
+        query["Athena · snapshot queries<br/>bronze_payments + silver_payments_rejected"]
+        manifests[("S3 glue · report manifests<br/>quarantine-reports/JobRunId/")]
+        topic["SNS · quarantine reports topic"]
+        email["Confirmed email subscribers"]
+        dlq["SQS · events DLQ<br/>Failed delivery / async execution"]
+        events --> reporter
+        timer --> reporter
+        reporter <-->|"Read / update state"| state
+        reporter -->|"Successful runs: counts"| query
+        reporter -->|"Report + query IDs"| manifests
+        reporter -->|"Publish report"| topic --> email
+        events -.->|"Delivery failure"| dlq
+        timer -.->|"Delivery failure"| dlq
+        reporter -.->|"Async failure"| dlq
+    end
+    logs["CloudWatch Logs<br/>Glue driver / Iceberg commits + Lambda logs"]
+    subgraph monitoring["Operational alarms · enable_alarms = true by default"]
+        metrics["Kinesis / Firehose metrics"]
+        alarms["CloudWatch alarms<br/>Lag / throttling"]
+        alarmtopic["SNS · separate alarms topic"]
+        operators["Email subscriber<br/>When alarm_email is configured and confirmed"]
+        metrics --> alarms --> alarmtopic --> operators
+    end
+    job -->|"State-change event"| events
+    reporter -.->|"Read Glue job-run history"| job
+    job -.-> logs
+    reporter -.-> logs
+    classDef storage fill:#e8f5e9,stroke:#2e7d32,color:#16351c
+    classDef compute fill:#fff3e0,stroke:#b45f06,color:#663600
+    classDef messaging fill:#e3f2fd,stroke:#1565c0,color:#0d3b66
+    classDef failure fill:#ffebee,stroke:#c62828,color:#751818
+    class state,manifests storage
+    class job,reporter,query compute
+    class events,timer,topic,alarmtopic messaging
+    class dlq failure
+```
+
+DynamoDB tracks report processing, not payment records. SQS is a failure
+queue; it is not on the normal report-delivery path. The Lambda queries Iceberg
+snapshots through the same Athena workgroup, with results in
+`s3://{gold}/athena-results/`. Failed Glue runs produce diagnostic reports with
+counts unavailable. SNS publication and DynamoDB checkpointing are not atomic,
+so a retry can duplicate an email.
+
+These diagrams describe repository configuration, not verified AWS deployment.
+Quarantine reporting is opt-in; its SNS topic is separate from operational alarms.
+
+To receive these emails, set `enable_quarantine_notifications = true` and add at least one address to `quarantine_notification_emails` in `infra/terraform/terraform.tfvars` before applying Terraform. Attach the [quarantine deployment policy](docs/iam-deploy-quarantine-policy.json) and confirm each SNS email subscription. For each terminal Glue job run, the report includes the run status and times. Successful runs also report total and newly rejected rows, with counts by rejection reason. The first report counts existing history as new; one row may have multiple rejection reasons.
+
+![Sanitized example of an SNS email for a successful Glue job run, showing quarantine totals and rejection reasons](docs/quarantine-report-email.png)
+
+Terraform provisions ingestion, storage, Glue, Athena, IAM, and the optional reporting and alarm resources shown above. The SDP job creates and refreshes the Iceberg tables, reading the latest Registry contract to define the bronze schema.
 
 | Stage | Service or output | Purpose |
 |---|---|---|
@@ -63,8 +152,20 @@ The current producer serializes `amount` as an exact JSON number in `currency`, 
 
 - Python 3.10+ and [uv](https://docs.astral.sh/uv/).
 - Docker. On Windows, use WSL to run `infra/tf.sh`.
-- AWS credentials with permission to deploy the resources. Use the policy templates described in [docs/iam-deploy.md](docs/iam-deploy.md); optional alarm and quarantine-report policies depend on the enabled features.
+- AWS credentials for a deployment identity configured with the IAM policies below.
 - Local AWS files at `.aws/config` and `.aws/credentials` (Git-ignored), and a root `.env` file. Never commit credentials or Terraform state.
+
+### Deployment IAM policies
+
+Before deploying the complete stack, an IAM administrator must create **three separate customer managed IAM policies** from these repository templates. Replace `ACCOUNT_ID` with the deployment account's 12-digit ID in each file before creating the policies, then attach them to the deployment identity:
+
+| Policy template | When to attach |
+|---|---|
+| [Core deployment policy](docs/iam-deploy-policy.json) | Always |
+| [Alarms policy](docs/iam-deploy-alarms-policy.json) | When `enable_alarms = true` (the default) |
+| [Quarantine reports policy](docs/iam-deploy-quarantine-policy.json) | When `enable_quarantine_notifications = true` |
+
+Attach all three when both optional features are enabled. These policies are an IAM bootstrap step; Terraform does not create or attach them to the deployment identity. For installation and permission scope, see [docs/iam-deploy.md](docs/iam-deploy.md).
 
 Example `.aws/config`:
 
